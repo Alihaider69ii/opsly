@@ -1,0 +1,141 @@
+# A production topology for one host (see docs/production.md). Unlike docker-compose.yml (local
+# development infrastructure only), this runs the whole application:
+#
+#   db, redis      private network only; nothing is published to the host
+#   migrate        one-shot: alembic upgrade head, then exits
+#   api, worker    the same hardened image; the worker drains the Redis queue
+#   frontend       the dashboard (Next.js)
+#
+# TLS is NOT terminated here: put a reverse proxy or load balancer in front of the frontend and the
+# api that serves HTTPS and appends the real client address to X-Forwarded-For. The api and the
+# frontend publish to 127.0.0.1 only, for that proxy.
+#
+# Every secret is REQUIRED: compose refuses to start with one unset (`${VAR:?message}`), and the
+# application itself refuses to start in ENVIRONMENT=production with a weak or placeholder value.
+#
+#   cp .env.production.example .env.production      # then fill it in; it is git-ignored
+#   docker compose --env-file .env.production -f docker-compose.production.yml run --rm migrate
+#   docker compose --env-file .env.production -f docker-compose.production.yml up -d
+name: bizflow
+
+x-backend-env: &backend-env
+  ENVIRONMENT: production
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql+psycopg://bizflow:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/bizflow
+  REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY}
+  CORS_ORIGINS: ${APP_ORIGIN:?set APP_ORIGIN, the https origin of the dashboard}
+  FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-172.28.0.0/24}
+  RATE_LIMIT_BACKEND: redis
+  LLM_PROVIDER: ${LLM_PROVIDER:?set LLM_PROVIDER}
+  LLM_MODEL: ${LLM_MODEL:-}
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  LLM_API_KEY: ${LLM_API_KEY:?set LLM_API_KEY}
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:?set EMBEDDING_PROVIDER}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+  EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+  EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:?set EMBEDDING_API_KEY}
+  SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+  SHOPIFY_CLIENT_ID: ${SHOPIFY_CLIENT_ID:-}
+  SHOPIFY_CLIENT_SECRET: ${SHOPIFY_CLIENT_SECRET:-}
+  SHOPIFY_REDIRECT_URI: ${APP_ORIGIN}/integrations/shopify/callback
+  SHOPIFY_WEBHOOK_BASE_URL: ${API_ORIGIN:-}
+  SHOPIFY_WEBHOOKS_DISABLED: ${SHOPIFY_WEBHOOKS_DISABLED:-false}
+
+x-backend: &backend
+  build: ./backend
+  image: bizflow-backend:latest
+  restart: unless-stopped
+  environment:
+    <<: *backend-env
+  networks: [internal]
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bizflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: bizflow
+    volumes: [pgdata:/var/lib/postgresql/data]
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bizflow -d bizflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    # The password is read from the environment inside the container, never put on a command line.
+    command: ["sh", "-c", 'exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes']
+    volumes: [redisdata:/data]
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", 'redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    <<: *backend
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db: {condition: service_healthy}
+
+  api:
+    <<: *backend
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.workers.main"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.workers.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${API_ORIGIN:?set API_ORIGIN, the public https origin of the api}
+        NEXT_PUBLIC_APP_URL: ${APP_ORIGIN:?set APP_ORIGIN}
+    image: bizflow-frontend:latest
+    restart: unless-stopped
+    environment:
+      API_URL: http://api:8000
+    ports: ["127.0.0.1:3000:3000"]
+    networks: [internal]
+    read_only: true
+    tmpfs: [/tmp, /app/.next/cache]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on: [api]
+
+networks:
+  internal:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  pgdata:
+  redisdata:

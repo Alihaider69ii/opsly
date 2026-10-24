@@ -1,0 +1,49 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# Generated widget bundle (build with `npm run build` in widget/)
+widget/dist/
+frontend/public/widget.js
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+
+# Key material and anything that can hold customer data must never be committed
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+*.sqlite
+*.sqlite3
+*.db
+# Output of `python -m tools.customer_data_export` (personal data of one customer)
+request-*.json
+# Browser-test artefacts (screenshots, traces, logs of real runs)
+e2e/artifacts/
+e2e/.env
+.coverage
+htmlcov/
+
+# Mutation-testing output
+backend/mutation/results.json

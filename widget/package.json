@@ -1,0 +1,15 @@
+{
+  "name": "bizflow-chat-widget",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Embeddable BizFlow website chat widget (vanilla JS, Shadow DOM, no secrets).",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.0.0"
+  }
+}

@@ -1,0 +1,37 @@
+# Local development infrastructure. The backend, worker and frontend run on the host (see README).
+services:
+  db:
+    # pgvector image: Postgres + the vector extension. The extension is enabled explicitly by an
+    # Alembic migration, never assumed to exist.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bizflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bizflow}
+      POSTGRES_DB: ${POSTGRES_DB:-bizflow}
+    # Loopback only (IPv4 and IPv6, because "localhost" resolves to ::1 first on many hosts and
+    # would otherwise wait for a connect timeout). The database is never exposed to the network.
+    ports:
+      - "127.0.0.1:5432:5432"
+      - "[::1]:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-bizflow}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    # Job queue for the crawl worker. Not a source of truth: job state lives in Postgres.
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+      - "[::1]:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
