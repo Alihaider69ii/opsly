@@ -9,7 +9,9 @@ failure-injection, and mutation gates remain unverified. Do not begin Phase 6.
 
 The pre-Phase-5 tree was entirely untracked on `main` with no commits. It matched the documented
 Phase 4.1 baseline (migrations `0001`-`0006`); the complete existing tree was committed first as
-`Phase 4.1 production-ready baseline`. Phase 5 edits are separate and not yet committed.
+`Phase 4.1 production-ready baseline`. Phase 5 implementation checkpoint is committed as
+`3aa8d2c` (`Phase 5 automation engine implementation checkpoint`). The phase remains open for
+database-backed verification and remaining production gates.
 
 ## Completed
 
@@ -125,9 +127,9 @@ Phase 4.1 baseline (migrations `0001`-`0006`); the complete existing tree was co
 
 ## Next Exact Action
 
-Review the full diff and final Git state, then create the Phase 5 implementation checkpoint commit.
-Keep database, browser E2E, failure-injection and mutation gates explicitly open until run in an
-available integration environment.
+Provision the integration environment and run migration up/down/up, Postgres/Redis integration and
+failure-injection, browser E2E, and mutation checks. Update this file with exact results. Keep Phase 5
+open until all production gates pass; do not start Phase 6.
 
 ## How To Resume
 
@@ -135,4 +137,5 @@ available integration environment.
 2. Resume with the next exact action above; use `backend/.venv/Scripts/python.exe` for Python tests.
 3. Backend non-integration suite has passed: 2,147 passed, 1 skipped, 125 deselected.
 4. For unavailable services, record the failure and leave the gate open; do not claim Phase 5 complete.
-5. Keep this file current at each meaningful checkpoint. Do not start Phase 6.
+5. The current implementation checkpoint is `3aa8d2c`; keep this file current at each meaningful
+   checkpoint. Do not start Phase 6.
