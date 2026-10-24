@@ -2,10 +2,9 @@
 
 ## Current Status
 
-Phase 5 implementation and repository verification gates are complete on the current tree. The final
-verification pass used real PostgreSQL, Redis, existing worker processes and browser E2E. The current
-verification changes are not yet committed; see Git status before deployment. This does not certify
-live Shopify, AI-provider or messaging delivery.
+Phase 5 implementation and repository verification gates are complete. The final verification pass
+used real PostgreSQL, Redis, existing worker processes and browser E2E. The verification checkpoint
+is recorded in Git; this does not certify live Shopify, AI-provider or messaging delivery.
 
 ## Completed
 
@@ -103,9 +102,8 @@ live Shopify, AI-provider or messaging delivery.
 
 ## Next Exact Action
 
-Review the final diff and commit the verification fixes and documentation. Then use the documented
-live-integration runbooks when Shopify and AI credentials/provider configuration are available. Do
-not start Phase 6 as part of this checkpoint.
+Use the documented live-integration runbooks when Shopify and AI credentials/provider configuration
+are available. Do not start Phase 6 as part of this checkpoint.
 
 ## How To Resume
 
