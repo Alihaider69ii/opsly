@@ -3,7 +3,7 @@
 AI automation layer for D2C / e-commerce businesses: connects a brand's Shopify store, website and
 WhatsApp Business account, and uses AI to answer customers, capture leads and run follow-ups.
 
-Status: **Phase 4.1 baseline complete; Phase 5 implementation underway and not yet production-gated**
+Status: **Phase 5 repository verification complete; external live-provider verification remains**
 (authentication, organization tenancy, knowledge base and website
 crawler, AI brain with RAG, an embeddable website chat widget, vendor-neutral AI providers, a Shopify
 integration that imports products, customers and orders, and the production hardening around all of
@@ -211,10 +211,10 @@ alembic revision --autogenerate -m "describe change"  # create (review the outpu
 alembic check                                         # fail if models and DB drift
 ```
 
-Phase 5 automation APIs, event/execution model, worker recovery, website lead capture, current
-verification status and limitations are documented in [docs/automation.md](docs/automation.md) and
-[docs/phase-5-progress.md](docs/phase-5-progress.md). Phase 5 has not passed its PostgreSQL/Redis,
-browser E2E, failure-injection or mutation gates; do not treat it as production-ready.
+Phase 5 automation APIs, event/execution model, worker recovery, website lead capture, verification
+results and limitations are documented in [docs/automation.md](docs/automation.md) and
+[docs/phase-5-progress.md](docs/phase-5-progress.md). Repository gates passed; live Shopify,
+AI-provider and messaging delivery were not verified.
 
 ## Environment variables
 
@@ -244,6 +244,7 @@ crawl limits are explained in [docs/knowledge-base.md](docs/knowledge-base.md#sc
 | `CRAWL_ALLOWED_PORTS` | worker, API | Ports the crawler may contact (default `80,443`) |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | backend | Access token lifetime (default `480`) |
 | `AUTH_RATE_LIMIT_ATTEMPTS` / `_WINDOW_SECONDS` | backend | Login/register limit per client IP (default 10 per 60 s) |
+| `SHOPIFY_OAUTH_RATE_LIMIT` | API | Shopify OAuth connect/callback attempts per client IP per 60 s (default 20; E2E raises this only in its isolated test process) |
 | `CORS_ORIGINS` | backend | Comma-separated allowed browser origins (default `http://localhost:3000`) |
 | `ENVIRONMENT` | backend, worker | `development`, `test`, `staging` or `production`. **`production` makes the API and the worker refuse to start with an unsafe configuration** (weak secrets, wildcard or http CORS, the fake AI provider, ...); see [docs/production.md](docs/production.md#4-the-production-startup-gate) |
 | `FORWARDED_ALLOW_IPS` | backend (uvicorn) | Peers allowed to set `X-Forwarded-For`; **required in production**, set to the frontend's address, never `*` unless the API is unreachable except via that proxy |

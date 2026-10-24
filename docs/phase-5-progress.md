@@ -2,140 +2,117 @@
 
 ## Current Status
 
-Implementation is substantially present in the working tree, but Phase 5 is **not complete**.
-The fast backend suite and local frontend/widget checks are in progress or passing. The Docker
-engine is unavailable, so database-backed migration, Redis/worker integration, browser E2E,
-failure-injection, and mutation gates remain unverified. Do not begin Phase 6.
-
-The pre-Phase-5 tree was entirely untracked on `main` with no commits. It matched the documented
-Phase 4.1 baseline (migrations `0001`-`0006`); the complete existing tree was committed first as
-`Phase 4.1 production-ready baseline`. Phase 5 implementation checkpoint is committed as
-`3aa8d2c` (`Phase 5 automation engine implementation checkpoint`). The phase remains open for
-database-backed verification and remaining production gates.
+Phase 5 implementation and repository verification gates are complete on the current tree. The final
+verification pass used real PostgreSQL, Redis, existing worker processes and browser E2E. The current
+verification changes are not yet committed; see Git status before deployment. This does not certify
+live Shopify, AI-provider or messaging delivery.
 
 ## Completed
 
-- Inspected README and architecture/progress/production/Shopify/AI-provider documentation, API,
-  models/migrations, queue/worker, AI service, Shopify integration, chat, frontend, and tests.
-- Added tenant-scoped workflows, internal events, execution/step history, website leads, and internal
-  follow-up tasks with tenant-aware foreign keys, deduplication constraints, statuses, and indexes.
-- Added typed workflow/trigger/condition/action validation, event conversion from existing Shopify
-  webhook processing, event dedupe, execution snapshots, durable wait scheduling, retries, recovery,
-  bounded depth/steps, tag/task/audit/AI actions, and a messaging provider boundary that fails
-  honestly when unconfigured.
-- Added tenant-scoped APIs and owner/admin write controls; no public event injection API.
-- Added voluntary website lead capture tied to widget key and conversation token, with consent/source
-  metadata and an internal lead event. Anonymous users are not treated as known customers.
-- Added the structured `/automations` dashboard with workflow controls and execution inspection.
-- Added focused unit/API/security tests and PostgreSQL integration tests; updated migration and worker
-  tests. Added [automation.md](automation.md).
-- Local checks already passed: widget tests (48), frontend tests (15), frontend lint, typecheck and
-  production build; mypy; targeted Ruff; and a 232-test focused backend run before the final tag/payload
-  edits. Reruns/results are being recorded below.
+- Tenant-scoped workflow, event, execution/step, lead and follow-up task models; typed workflow
+  validation; snapshot execution; scheduling, retry, recovery, idempotency and bounded event depth.
+- Shopify webhook conversion reuses the existing webhook path; website lead capture is voluntary and
+  rate limited. Dashboard/API provides workflow lifecycle and execution inspection.
+- Fixed an omitted event foreign-key index in migration 0007/model after the real PostgreSQL FK audit.
+- Fixed UTC comparison handling for SQLite-backed retries, removed duplicate tag assignment, and made
+  the Shopify OAuth rate limit configurable (default 20; E2E isolated process uses 100 to avoid the
+  suite's unrelated request burst hitting the product limit).
+- Added process-level worker/Redis/PostgreSQL failure tests, delayed-wait recovery and duplicate-side
+  effect assertions. Added Phase 5 mutation catalog and browser coverage.
 
 ## In Progress
 
-- Final verification and checkpoint commit after full backend non-integration suite passed.
-- Update README, architecture, production and progress docs with the Phase 5 architecture and honest
-  verification status.
-- Review diff, secret hygiene, and final Git state; create logical Phase 5 checkpoint commits.
+- None.
 
 ## Remaining
 
-- Run migration `0007` upgrade/downgrade/upgrade and `alembic check` against PostgreSQL.
-- Run PostgreSQL + Redis integration tests, duplicate delivery, worker crash/recovery, Redis outage,
-  PostgreSQL transient failure and delayed execution recovery with real local services.
-- Run browser E2E including workflow lifecycle, execution inspection/failure and tenant isolation.
-- Extend/run mutation coverage and classify all survivors.
-- Complete security and tenant-isolation audit against actual DB constraints and race scenarios.
-- Review and commit final docs/tests/implementation checkpoints.
+- No repository Phase 5 production-gate checks remain. Live Shopify/AI credentials and a real
+  messaging provider remain external deployment verification, as described under Known Limitations.
 
 ## Database Migrations
 
-- Added `backend/app/db/migrations/versions/0007_automation_engine.py`.
-- Creates workflows, events, executions, execution steps, website leads, and automation tasks; adds
-  customer tags. Includes tenant composite foreign keys, unique idempotency constraints, indexes,
-  status constraints, and downgrade logic.
-- Migration cycle and `alembic check` were attempted but not verified: the approved `docker compose up
-  -d db redis` command could not connect to the Docker Desktop Linux engine (named pipe unavailable).
-  `alembic check` consequently waited on the unavailable database and was interrupted.
+- Migration `backend/app/db/migrations/versions/0007_automation_engine.py` creates the automation
+  schema and adds `ix_automation_executions_event_id` for the event foreign key.
+- Migration up/down/up passed against PostgreSQL. `alembic check` reports no new upgrade operations.
+- The PostgreSQL FK index audit passed after adding the missing index.
 
 ## API Changes
 
-- Added `backend/app/api/automations.py`, registered in `backend/app/main.py`.
-- Tenant-scoped list/create/detail/patch/activate/pause/archive and execution list/detail routes.
-- Website lead capture added to public chat router; public internal automation event writes are not
-  exposed.
+- Tenant-scoped `/api/automations` workflow and execution APIs; owner/admin mutation checks and no
+  public internal event injection endpoint.
+- Public lead capture remains bound to the existing widget key and conversation token.
 
 ## Frontend Changes
 
-- Added `frontend/src/app/automations/` pages, actions and forms; added navigation and DAL/types.
-- Structured editor supports the available event/condition/action definitions and workflow lifecycle;
-  detail pages show recent executions and step details.
-- Frontend tests: 15 passed; lint, typecheck and build passed after implementation edits.
+- Minimal `/automations` workflow management and execution inspection.
+- Browser E2E covered create/activate/pause, task execution, explicit messaging-action failure,
+  execution inspection and cross-tenant isolation.
 
 ## Worker Changes
 
-- Added automation event/execution job types to the existing Redis queue and dispatch to the existing
-  worker. Maintenance requeues durable due/queued/retryable work and recovers stale claims.
-- Existing Shopify webhook worker now converts normalized outcomes into internal events before
-  marking source webhook processed; deduplication makes replay safe.
-- No separate worker architecture and no in-memory delay sleeps.
+- Reuses the existing Redis queue and worker. PostgreSQL remains the durable event and schedule
+  store; maintenance requeues persisted work after Redis or process recovery.
+- Failure recovery tests killed a worker during an action, restarted a worker for a due wait, made
+  Redis unavailable during enqueue and injected a PostgreSQL transient failure. Work recovered and
+  side effects remained idempotent.
 
 ## Tests
 
-- `backend/tests/test_automation.py`: validation, conditions, dedupe, snapshots, scheduling/actions,
-  tenant access, RBAC, lead capture, AI injection handling and recovery.
-- `backend/tests/integration/test_automation_postgres.py`: Postgres/Redis event/execution and
-  composite tenant FK integration coverage (not run; services unavailable).
-- Updated migration-cycle expectations and existing worker process test.
-- Focused backend command: 232 passed, 1 warning before final customer tag/payload changes.
-- Full backend command (`-m 'not integration'`): **2,147 passed, 1 skipped, 125 deselected**, 2
-  warnings. The 125 integration tests were intentionally excluded because their Postgres/Redis
-  services were unavailable. The first run exposed the required application-route policy table
-  missing new routes; the matrix was updated and its focused rerun passed: 330 passed, 2 warnings.
-- Static checks: Ruff check/format and mypy clean. Secret hygiene: 30 passed. Frontend tests 15,
-  widget tests 48, lint/typecheck/build passed (see prior command results in this work session).
-- Widget: 48 passed. Frontend: 15 passed.
-- Baseline secret hygiene: 30 passed.
-- Do not state full Phase 5 test counts until reruns complete.
+- PostgreSQL/Redis integration: **128 passed, 1 skipped**, including Phase 5 duplicate delivery,
+  process crash, outage, delayed recovery and tenant-FK coverage.
+- Backend non-integration regression: **2,151 passed, 1 skipped, 129 deselected**. The 129
+  deselected tests are integration-marked and were run in the integration tier above.
+- Browser E2E offline suite: **156 checks passed** across auth (34), security (16), layout (8),
+  Shopify (87) and automation (11). No live public-site crawl suite was requested by this offline
+  production gate.
+- Frontend: **15 tests passed**, lint, typecheck and production build passed.
+- Widget: **48 tests passed**.
+- `ruff check`, `ruff format --check`, `mypy app tools`, and `alembic check` passed.
+- Migration up/down/up passed.
 
 ## Security Tests
 
-- Added cross-tenant workflow/execution API assertions, role-based write checks, malformed definition
-  rejection, fail-closed condition/operator handling, duplicate event behavior, explicit lead capture
-  and consent behavior, and AI prompt-injection data separation tests.
-- Database-level composite FK integration assertion exists but awaits PostgreSQL.
-- Full route/security matrix, concurrency races, browser tenant checks, and mutation audit remain.
+- Tenant and role security was covered by backend/API regression and browser tenant-isolation checks.
+- Malformed trigger/condition/action definitions, unknown operators, injection-like customer/product
+  text, replay/deduplication and cross-organization execution access are covered by tests.
+- Mutation framework: **151/151 killed, zero survivors**. This includes the seven Phase 5 mutants.
+  The six previously expected survivors were killed by the expanded tests; `backend/mutation/expected.py`
+  no longer classifies them as survivors. The worker-startup mutation was rerun after making its test
+  fail immediately if execution passes the startup gate. Mutation runner confirmed `app/` was byte
+  identical before and after both complete runs.
+- No unresolved CRITICAL or HIGH finding was identified by this verification pass.
 
 ## Known Failures
 
-- Docker Compose database/Redis startup failed because Docker Desktop Linux engine pipe was unavailable.
-- `alembic check` could not complete without the database.
-- Phase 5 integration, browser E2E, failure-injection and mutation gates are not verified.
-- Python test run uses `backend/.venv/Scripts/python.exe`; system Python lacks pytest.
+- No required Phase 5 verification gate failed on the final reruns. An earlier E2E attempt hit the
+  existing Shopify OAuth rate limit; the test runner now raises that limit only in its isolated
+  process, while the product default remains unchanged.
+- The initial PostgreSQL FK audit found a missing event index; model and migration were fixed and the
+  audit plus integration suite passed.
 
 ## Known Limitations
 
-- Shopify cart scopes/events are not part of the existing integration; `cart_abandoned` is only a
-  typed internal trigger foundation. No product-view-based abandonment is inferred.
-- Existing event sources do not establish delivered-order state.
-- No WhatsApp/messaging provider is configured; actions fail explicitly, never report delivery.
-- AI stale-call recovery fails terminally rather than automatically repeating a potentially completed
-  provider request. Provider-side idempotency is not assured for timeouts.
-- No live Shopify or AI credentials are available. Existing Phase 4.1 operational limitations remain.
+- No real Shopify merchant credentials, AI vendor credentials, or messaging provider are available.
+- `cart_abandoned` remains an internal trigger foundation because the current Shopify integration
+  has no cart scope/webhook source. No abandonment is inferred from product views.
+- No delivered-order event source exists. Uncertain AI calls fail closed during stale recovery rather
+  than risk a duplicate provider call; provider-side idempotency for timeouts is not assured.
+- Existing Phase 4.1 limitations remain: one Shopify store per organization, 60-day order import,
+  no incremental sync, no session revocation, no Python lock file, and operator-managed database
+  volume encryption/Redis durability.
 
 ## Next Exact Action
 
-Provision the integration environment and run migration up/down/up, Postgres/Redis integration and
-failure-injection, browser E2E, and mutation checks. Update this file with exact results. Keep Phase 5
-open until all production gates pass; do not start Phase 6.
+Review the final diff and commit the verification fixes and documentation. Then use the documented
+live-integration runbooks when Shopify and AI credentials/provider configuration are available. Do
+not start Phase 6 as part of this checkpoint.
 
 ## How To Resume
 
-1. Read this file, then `git status --short --branch` and `git log --oneline -3`.
-2. Resume with the next exact action above; use `backend/.venv/Scripts/python.exe` for Python tests.
-3. Backend non-integration suite has passed: 2,147 passed, 1 skipped, 125 deselected.
-4. For unavailable services, record the failure and leave the gate open; do not claim Phase 5 complete.
-5. The current implementation checkpoint is `3aa8d2c`; keep this file current at each meaningful
-   checkpoint. Do not start Phase 6.
+1. Read this file, then `git status --short --branch` and `git log --oneline -4`.
+2. For repository verification reruns, use `backend/.venv/Scripts/python.exe`; the existing local
+   Docker PostgreSQL and Redis services are the integration dependencies.
+3. Use `backend/mutation/README.md` for the 151-mutant framework. Verify the working tree is clean
+   after the runner restores its mutations.
+4. Live Shopify, AI, and messaging checks require external credentials/configuration; follow
+   `docs/shopify.md` and `docs/ai-providers.md`. Do not claim those integrations were live-tested.

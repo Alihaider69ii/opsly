@@ -54,7 +54,7 @@ ManagerOrg = Annotated[
 
 _oauth_limit = rate_limit(
     "shopify-oauth",
-    limit=lambda s: 20,
+    limit=lambda s: s.shopify_oauth_rate_limit,
     window=lambda s: 60,
     detail="Too many Shopify connection attempts. Please wait a moment.",
 )

@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     # Per-client-IP attempts allowed per window on /api/auth/login and /api/auth/register.
     auth_rate_limit_attempts: int = 10
     auth_rate_limit_window_seconds: int = 60
+    # Per-client-IP Shopify OAuth connect/callback attempts; keep the production default bounded.
+    shopify_oauth_rate_limit: int = Field(default=20, ge=1, le=1000)
 
     # Uvicorn reads this itself to decide which peers may set X-Forwarded-For; the application reads
     # it too, so production can refuse to start without an explicit decision (see startup_checks).

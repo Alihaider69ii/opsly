@@ -73,7 +73,8 @@ worker health/recovery mechanisms are reused. Review failed execution/step class
 attempt counts from the authenticated dashboard API. Keep database backups and Redis configured as
 documented in `production.md`.
 
-The Phase 5 local code checks pass as recorded in `phase-5-progress.md`, but this environment did
-not provide a running PostgreSQL/Redis Docker engine. Migration up/down/up, database/worker crash
-injection, browser E2E and mutation coverage have not been verified for Phase 5. Do not treat this
-feature as production-gated until those checks are run in the project integration environment.
+Phase 5 repository verification is complete; exact results are recorded in
+[`phase-5-progress.md`](phase-5-progress.md). PostgreSQL and Redis integration, migration
+up/down/up, worker and outage recovery, browser E2E, security/tenant isolation, static checks and the
+151-mutant suite passed. This does not claim live Shopify, AI-provider or messaging delivery. Those
+integrations require external credentials/providers and remain deployment verification.

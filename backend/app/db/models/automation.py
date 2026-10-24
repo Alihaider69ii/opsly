@@ -185,6 +185,7 @@ class AutomationExecution(UUIDPrimaryKeyMixin, Base):
         ),
         UniqueConstraint("workflow_id", "event_id", name="uq_automation_executions_workflow_event"),
         UniqueConstraint("id", "organization_id", name="uq_automation_executions_id_org"),
+        Index("ix_automation_executions_event_id", "event_id"),
         Index("ix_automation_executions_org_created", "organization_id", "created_at"),
         Index("ix_automation_executions_status_next", "status", "next_run_at"),
     )

@@ -29,7 +29,7 @@ const args = process.argv.slice(2);
 const flags = new Set(args.filter((a) => a.startsWith("--")));
 const requested = args.filter((a) => !a.startsWith("--"));
 
-const OFFLINE = ["auth", "security", "layout", "shopify"];
+const OFFLINE = ["auth", "security", "layout", "shopify", "automations"];
 const INTERNET = ["knowledge", "chat"]; // crawl example.com / quotes.toscrape.com
 const suites = requested.length ? requested : flags.has("--with-internet") ? [...OFFLINE, ...INTERNET] : OFFLINE;
 
@@ -164,6 +164,7 @@ async function main() {
     FORWARDED_ALLOW_IPS: "127.0.0.1",
     RATE_LIMIT_BACKEND: "memory",
     AUTH_RATE_LIMIT_ATTEMPTS: "500", // many sign-ups from one address; the public chat limits stay default
+    SHOPIFY_OAUTH_RATE_LIMIT: "100", // this suite deliberately exercises many OAuth failure paths
     CRAWL_MIN_INTERVAL_SECONDS: "0", // the knowledge suite re-crawls straight away (the default is 60 s)
     CRAWL_MAX_PAGES: "8", // the knowledge suite asserts the worker stops a multi-page site at 8 pages
     SHOPIFY_CLIENT_ID: "e2e-client-id",

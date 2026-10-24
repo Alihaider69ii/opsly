@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.models import (
     AutomationEvent,
@@ -52,6 +52,9 @@ def test_condition_evaluation_is_typed_and_fails_closed():
         [{"field": "cart.total", "op": "gt", "value": "bad"}], payload
     )
     assert not automation.conditions_match([{"field": "customer.email", "op": "exists"}], payload)
+    assert not automation.conditions_match(
+        [{"field": "cart.total", "op": "execute", "value": "anything"}], payload
+    )
 
 
 def test_time_condition_compares_iso_timestamps():
@@ -98,6 +101,60 @@ def test_event_dedupe_and_dispatch_create_one_versioned_execution(db, queue, ten
     assert execution.workflow_version == 2
     assert execution.workflow_snapshot["definition"] == workflow.definition
     assert automation.dispatch_event(db, first.id, queue) == 0
+
+
+def test_only_active_workflows_dispatch_and_maximum_event_depth_is_bounded(db, queue, tenants):
+    org_id = uuid.UUID(tenants[0].org["id"])
+    for status in (WorkflowStatus.DRAFT, WorkflowStatus.PAUSED, WorkflowStatus.ARCHIVED):
+        db.add(
+            AutomationWorkflow(
+                organization_id=org_id,
+                name=f"{status.value} workflow",
+                status=status,
+                version=1,
+                definition={
+                    "trigger": {"event": "order_created"},
+                    "conditions": [],
+                    "actions": [{"type": "log", "message": "must not run"}],
+                },
+            )
+        )
+    db.commit()
+    event = automation.ingest_event(
+        db,
+        queue,
+        organization_id=org_id,
+        event_type="order_created",
+        source="internal",
+        source_id="inactive-workflows",
+        dedupe_key="inactive-workflows",
+        payload={},
+    )
+    assert automation.dispatch_event(db, event.id, queue) == 0
+    assert db.scalar(select(func.count()).select_from(AutomationExecution)) == 0
+    assert automation.ingest_event(
+        db,
+        queue,
+        organization_id=org_id,
+        event_type="order_created",
+        source="internal",
+        source_id="max-depth",
+        dedupe_key="max-depth",
+        payload={},
+        depth=automation.MAX_DEPTH,
+    )
+    with pytest.raises(automation.InvalidWorkflow):
+        automation.ingest_event(
+            db,
+            queue,
+            organization_id=org_id,
+            event_type="order_created",
+            source="internal",
+            source_id="too-deep",
+            dedupe_key="too-deep",
+            payload={},
+            depth=automation.MAX_DEPTH + 1,
+        )
 
 
 def test_execution_actions_are_idempotent_and_delay_is_durable(db, queue, tenants):
@@ -178,7 +235,9 @@ def test_execution_actions_are_idempotent_and_delay_is_durable(db, queue, tenant
 
 def test_tag_action_is_tenant_scoped_and_idempotent(db, queue, tenants):
     org_id = uuid.UUID(tenants[0].org["id"])
-    customer = Customer(organization_id=org_id, email="lead@example.com", tags=["existing"])
+    customer = Customer(
+        organization_id=org_id, email="lead@example.com", tags=["existing", "welcome"]
+    )
     db.add(customer)
     workflow = AutomationWorkflow(
         organization_id=org_id,
@@ -357,6 +416,81 @@ def test_ai_action_uses_provider_registry_and_untrusted_event_context(
     assert step is not None and step.safe_result == {"generated_text": "Hello from BizFlow"}
 
 
+def test_rate_limited_ai_action_retries_only_after_durable_backoff(db, queue, tenants, monkeypatch):
+    from app.services.ai.errors import AIError
+    from app.services.ai.provider import AIResponse
+
+    class RateLimitedOnce:
+        calls = 0
+
+        def generate(self, _request):
+            self.calls += 1
+            if self.calls == 1:
+                raise AIError("rate_limited")
+            return AIResponse(text="Retry succeeded", provider="fake", model="test")
+
+    provider = RateLimitedOnce()
+    monkeypatch.setattr(automation, "get_llm_provider", lambda: provider)
+    org_id = uuid.UUID(tenants[0].org["id"])
+    workflow = AutomationWorkflow(
+        organization_id=org_id,
+        name="Retry copy",
+        status=WorkflowStatus.ACTIVE,
+        version=1,
+        definition={
+            "trigger": {"event": "cart_abandoned"},
+            "conditions": [],
+            "actions": [{"type": "ai_generate", "prompt": "Write a reminder"}],
+        },
+    )
+    event = AutomationEvent(
+        organization_id=org_id,
+        event_type="cart_abandoned",
+        source="shopify",
+        dedupe_key="retry-copy",
+        occurred_at=datetime.now(UTC),
+        payload={},
+        depth=0,
+        status=EventStatus.PROCESSED,
+        created_at=datetime.now(UTC),
+    )
+    db.add_all([workflow, event])
+    db.commit()
+    execution = AutomationExecution(
+        organization_id=org_id,
+        workflow_id=workflow.id,
+        event_id=event.id,
+        workflow_version=1,
+        workflow_snapshot={"name": workflow.name, "definition": workflow.definition},
+        event_snapshot={},
+        status=ExecutionStatus.QUEUED,
+        current_step=0,
+        attempts=0,
+        max_attempts=5,
+        created_at=datetime.now(UTC),
+    )
+    db.add(execution)
+    db.commit()
+
+    assert automation.run_execution(db, execution.id, queue) == "retrying"
+    db.refresh(execution)
+    assert execution.status == ExecutionStatus.RETRYING
+    assert execution.next_run_at is not None
+    assert execution.next_run_at.replace(tzinfo=UTC) > datetime.now(UTC)
+    assert provider.calls == 1
+    assert automation.run_execution(db, execution.id, queue) == "waiting"
+    assert provider.calls == 1
+
+    execution.next_run_at = datetime.now(UTC) - timedelta(seconds=1)
+    db.commit()
+    assert automation.recover_due(db, queue) == 1
+    assert len(queue.jobs) == 1
+    assert automation.run_execution(db, execution.id, queue) == "completed"
+    assert provider.calls == 2
+    assert automation.run_execution(db, execution.id, queue) == "skipped"
+    assert provider.calls == 2
+
+
 def test_automation_recovery_requeues_due_execution_and_fails_ambiguous_ai(db, queue, tenants):
     org_id = uuid.UUID(tenants[0].org["id"])
     workflow = AutomationWorkflow(
@@ -415,3 +549,66 @@ def test_automation_recovery_requeues_due_execution_and_fails_ambiguous_ai(db, q
     db.refresh(execution)
     assert execution.status == ExecutionStatus.FAILED
     assert execution.error_code == "worker_lost_during_ai_call"
+
+
+def test_due_waiting_execution_is_recovered_to_redis_once(db, queue, tenants):
+    org_id = uuid.UUID(tenants[0].org["id"])
+    workflow = AutomationWorkflow(
+        organization_id=org_id,
+        name="Delayed task",
+        status=WorkflowStatus.ACTIVE,
+        version=1,
+        definition={
+            "trigger": {"event": "website_lead_captured"},
+            "conditions": [],
+            "actions": [
+                {"type": "wait", "seconds": 60},
+                {"type": "create_task", "title": "Run after wait"},
+            ],
+        },
+    )
+    event = AutomationEvent(
+        organization_id=org_id,
+        event_type="website_lead_captured",
+        source="website",
+        dedupe_key="due-waiting-recovery",
+        occurred_at=datetime.now(UTC),
+        payload={},
+        depth=0,
+        status=EventStatus.PROCESSED,
+        created_at=datetime.now(UTC),
+    )
+    db.add_all([workflow, event])
+    db.commit()
+    execution = AutomationExecution(
+        organization_id=org_id,
+        workflow_id=workflow.id,
+        event_id=event.id,
+        workflow_version=1,
+        workflow_snapshot={"name": workflow.name, "definition": workflow.definition},
+        event_snapshot={},
+        status=ExecutionStatus.WAITING,
+        current_step=0,
+        attempts=0,
+        max_attempts=5,
+        next_run_at=datetime.now(UTC) - timedelta(seconds=1),
+        created_at=datetime.now(UTC),
+    )
+    db.add(execution)
+    db.flush()
+    db.add(
+        AutomationExecutionStep(
+            organization_id=org_id,
+            execution_id=execution.id,
+            step_index=0,
+            action_snapshot=workflow.definition["actions"][0],
+            status=StepStatus.WAITING,
+            attempts=1,
+            scheduled_at=execution.next_run_at,
+            created_at=datetime.now(UTC),
+        )
+    )
+    db.commit()
+    assert automation.recover_due(db, queue) == 1
+    assert len(queue.jobs) == 1
+    assert queue.jobs[0].execution_id == execution.id

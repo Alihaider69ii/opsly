@@ -70,6 +70,11 @@ class InvalidWorkflow(ValueError):
     pass
 
 
+def _as_utc(value: datetime) -> datetime:
+    """SQLite drops timezone metadata; interpret naive stored values as UTC."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 class MessagingProvider(Protocol):
     """External adapters must honor the stable key before a delivery is enabled."""
 
@@ -315,7 +320,7 @@ def run_execution(db: Session, execution_id: uuid.UUID, queue: JobQueue) -> str:
         ExecutionStatus.CANCELLED,
     }:
         return "skipped"
-    if execution.next_run_at and execution.next_run_at > now:
+    if execution.next_run_at and _as_utc(execution.next_run_at) > now:
         return "waiting"
     execution.status = ExecutionStatus.RUNNING
     execution.started_at = execution.started_at or now
@@ -349,7 +354,7 @@ def run_execution(db: Session, execution_id: uuid.UUID, queue: JobQueue) -> str:
             if (
                 step.status == StepStatus.WAITING
                 and step.scheduled_at is not None
-                and step.scheduled_at <= now
+                and _as_utc(step.scheduled_at) <= now
             ):
                 step.status = StepStatus.COMPLETED
                 step.finished_at = now
@@ -513,8 +518,6 @@ def run_execution(db: Session, execution_id: uuid.UUID, queue: JobQueue) -> str:
                     step.finished_at = now
                     db.commit()
                     return "failed"
-                lead.tags = list(dict.fromkeys([*(lead.tags or []), action["tag"]]))[:100]
-                lead.tags = list(dict.fromkeys([*(lead.tags or []), action["tag"]]))[:100]
                 lead.tags = list(dict.fromkeys([*(lead.tags or []), action["tag"]]))[:100]
             elif not customer_id and not lead_id:
                 step.status, step.error_code = StepStatus.FAILED, "customer_identity_missing"

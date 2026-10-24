@@ -26,6 +26,8 @@ python -m mutation.run report            # the last results; `results.json` is g
   containment, log redaction, secret masking, tenant/role enforcement, Shopify error and version
   handling, webhook self-healing, the disconnect race, the Anthropic adapter and shared HTTP client,
   key rotation, the database engine).
+* `catalog_5.py`: Phase 5 fail-closed conditions, inactive-workflow filtering, event idempotency,
+  execution-depth bounds, task/tag side effects, and durable wait recovery.
 
 The runner hashes the whole `app/` tree before and after and reports an error if they differ, so an
 interrupted run cannot silently leave a mutated file behind (if you ever interrupt one, run

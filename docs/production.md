@@ -138,6 +138,7 @@ nothing else.
 | What | Policy |
 | --- | --- |
 | Shopify call | Waits for the GraphQL cost bucket before sending; `THROTTLED`/HTTP 429 retry with exponential backoff and jitter, honouring `Retry-After` (capped 60 s), at most `SHOPIFY_MAX_RETRIES` (5); `5xx` and timeouts retry. **Never retried:** `401` (one token refresh only), `403`, `402/404/423` (shop unavailable), invalid requests, redirects. |
+| Shopify OAuth initiation/callback | Per-client-IP limit: `SHOPIFY_OAUTH_RATE_LIMIT` per 60 s (default 20; bounded configuration). The isolated browser suite raises this test-process setting because it intentionally exercises many rejected and successful OAuth paths; production retains the default unless an operator explicitly changes it. |
 | Sync stage | Claimed atomically; up to 3 job-level attempts; a stage whose heartbeat is older than `SHOPIFY_SYNC_STALE_AFTER_SECONDS` (600) returns to `PENDING` with its cursor, or is `FAILED` "interrupted" after 3 attempts. Pending stages older than 300 s are re-queued. |
 | Webhook event | Claimed atomically; up to 5 attempts; events older than 120 s that are `PENDING` or stuck `PROCESSING` are re-queued (age is measured from receipt, so a long-running job is re-queued only if it also exceeds that). Processing is idempotent (it re-reads the object). |
 | Webhook subscriptions | Shopify deletes an API-created subscription after 8 failed deliveries (about 4 hours). Every `SHOPIFY_WEBHOOK_AUDIT_INTERVAL_SECONDS` (3600) the worker checks each store's subscriptions, re-creates missing ones and queues a catch-up sync. |
@@ -336,13 +337,11 @@ CRITICAL or HIGH is resolved. Nothing CRITICAL was found.
 
 ## 16. Verification results (final run, 23 October 2026)
 
-Those results describe the Phase 4.1 baseline and do not certify Phase 5. The Phase 5 automation
-implementation is underway; its current local checks, unavailable infrastructure checks and exact
-remaining production gates are tracked in [phase-5-progress.md](phase-5-progress.md), with design
-details in [automation.md](automation.md). In this environment PostgreSQL/Redis could not be started
-because the Docker Desktop engine was unavailable, so migration-cycle, integration, worker failure
-injection, browser E2E and mutation results are not established for Phase 5. Do not infer Phase 5
-production readiness from the Phase 4.1 table below.
+Those results describe the Phase 4.1 baseline only. Phase 5 verification results are recorded in
+[phase-5-progress.md](phase-5-progress.md), with architecture details in [automation.md](automation.md).
+The Phase 5 production-gate run completed after PostgreSQL and Redis became available; see the
+Phase 5 record for exact counts. Live Shopify, AI-provider and messaging delivery were not verified
+and remain external deployment checks.
 
 All of the below ran on the final tree. The same commands are in section 14.
 
@@ -359,3 +358,10 @@ All of the below ran on the final tree. The same commands are in section 14.
 | Containers | Backend and frontend images built; the production topology ran (migration job, API, worker, frontend, database, Redis); an unsafe configuration was refused without printing any value; Redis and PostgreSQL outages were injected and recovered without restarting the API or worker; no secret appeared in any container's log |
 | Real-log scan | The end-to-end stack's API, worker, fake-Shopify and dashboard logs were scanned for 13 token, key, OAuth, ciphertext, password and customer-data patterns: nothing, apart from L-7 above and the app's own error *codes* (`code=invalid_state`) |
 | Live Shopify store, live webhooks, live AI vendor | **Not run: EXTERNALLY BLOCKED** (no credentials). Runbooks and checker tools: `docs/shopify.md`, `docs/ai-providers.md` |
+
+## 17. Phase 5 verification (24 October 2026)
+
+The automation-engine repository gate is complete. The full test counts, migration cycle, worker
+crash/outage recovery results, browser coverage, mutation result and limitations are in
+[phase-5-progress.md](phase-5-progress.md). PostgreSQL and Redis ran locally; this was not a test
+against a live Shopify merchant, AI vendor, or messaging provider. No WhatsApp delivery is claimed.

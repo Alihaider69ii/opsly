@@ -39,6 +39,13 @@ def problems(**overrides) -> list[str]:
     return check_configuration(production(**overrides), environ={}).problems
 
 
+def test_shopify_oauth_rate_limit_defaults_to_twenty_and_is_bounded():
+    assert production().shopify_oauth_rate_limit == 20
+    assert production(shopify_oauth_rate_limit=100).shopify_oauth_rate_limit == 100
+    with pytest.raises(ValidationError):
+        production(shopify_oauth_rate_limit=0)
+
+
 # --- a correct production configuration starts cleanly ------------------------------------------------
 
 
@@ -309,6 +316,11 @@ def test_the_worker_refuses_to_start_unsafely(monkeypatch):
 
     monkeypatch.setattr(worker, "get_settings", lambda: production(forwarded_allow_ips=""))
     monkeypatch.setattr(worker, "configure_worker_logging", lambda: None)
+    monkeypatch.setattr(
+        worker,
+        "RedisJobQueue",
+        lambda *_args, **_kwargs: pytest.fail("worker proceeded past the production startup gate"),
+    )
     monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
     with pytest.raises(UnsafeConfiguration):
         worker.main()

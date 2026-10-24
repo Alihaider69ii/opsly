@@ -16,16 +16,24 @@ import json
 import re
 import sys
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
+import redis
 from pydantic import SecretStr
 from sqlalchemy import func, select, text
 
 from app.core.config import get_settings
 from app.core.secrets import SecretManager
 from app.db.models import (
+    AutomationEvent,
+    AutomationExecution,
+    AutomationExecutionStep,
+    AutomationTask,
+    AutomationWorkflow,
     Customer,
+    EventStatus,
+    ExecutionStatus,
     Order,
     OrderItem,
     Organization,
@@ -35,14 +43,22 @@ from app.db.models import (
     ShopifyConnectionStatus,
     ShopifySyncState,
     ShopifyWebhookEvent,
+    StepStatus,
     SyncResource,
     SyncStatus,
     WebhookEventStatus,
+    WorkflowStatus,
 )
+from app.services import automation
 from app.services.integrations.shopify import sync, webhooks
 from app.services.integrations.shopify.factory import ShopifyRuntime
 from app.services.integrations.shopify.validation import sign_webhook_body
-from app.workers.queue import RedisJobQueue, ShopifySyncJob, ShopifyWebhookJob
+from app.workers.queue import (
+    AutomationExecutionJob,
+    RedisJobQueue,
+    ShopifySyncJob,
+    ShopifyWebhookJob,
+)
 from tests.integration.conftest import TEST_DATABASE_URL, TEST_REDIS_URL
 from tests.integration.process_harness import (
     TcpProxy,
@@ -477,6 +493,286 @@ def test_postgres_going_away_mid_import_the_worker_survives_and_the_import_is_re
     eventually(stack.synced, timeout=150, what="the import to complete once the database returned")
     stack.expect_everything_imported()
     assert worker.alive
+
+
+def _automation_execution(stack, actions: list[dict]) -> uuid.UUID:
+    execution_id = uuid.uuid4()
+    with stack.pg() as db:
+        workflow = AutomationWorkflow(
+            organization_id=stack.org_id,
+            name=f"Recovery {execution_id}",
+            status=WorkflowStatus.ACTIVE,
+            version=1,
+            definition={
+                "trigger": {"event": "order_created"},
+                "conditions": [],
+                "actions": actions,
+            },
+        )
+        event = AutomationEvent(
+            organization_id=stack.org_id,
+            event_type="order_created",
+            source="internal",
+            source_id=str(execution_id),
+            dedupe_key=f"recovery:{execution_id}",
+            occurred_at=datetime.now(UTC),
+            payload={},
+            depth=0,
+            status=EventStatus.PROCESSED,
+            attempts=1,
+            created_at=datetime.now(UTC),
+        )
+        db.add_all([workflow, event])
+        db.flush()
+        execution = AutomationExecution(
+            id=execution_id,
+            organization_id=stack.org_id,
+            workflow_id=workflow.id,
+            event_id=event.id,
+            workflow_version=workflow.version,
+            workflow_snapshot={"name": workflow.name, "definition": workflow.definition},
+            event_snapshot={},
+            status=ExecutionStatus.QUEUED,
+            current_step=0,
+            attempts=0,
+            max_attempts=5,
+            created_at=datetime.now(UTC),
+        )
+        db.add(execution)
+        db.commit()
+    stack.queue.enqueue(AutomationExecutionJob(execution_id))
+    return execution_id
+
+
+def _hold_automation_task_insert(stack) -> None:
+    with stack.pg() as db:
+        db.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION test_pause_automation_task() RETURNS trigger "
+                "LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(120); RETURN NEW; END $$"
+            )
+        )
+        db.execute(text("DROP TRIGGER IF EXISTS test_pause_automation_task ON automation_tasks"))
+        db.execute(
+            text(
+                "CREATE TRIGGER test_pause_automation_task BEFORE INSERT ON automation_tasks "
+                "FOR EACH ROW EXECUTE FUNCTION test_pause_automation_task()"
+            )
+        )
+        db.commit()
+
+
+def _remove_automation_task_hold(stack) -> None:
+    with stack.pg() as db:
+        # A hard-killed client cannot send PostgreSQL a cancel while its backend is in pg_sleep.
+        # Cancel that test-only query so dropping the trigger does not wait for the full 120 s.
+        db.execute(
+            text(
+                "SELECT pg_cancel_backend(pid) FROM pg_stat_activity "
+                "WHERE datname=current_database() AND wait_event='PgSleep' "
+                "AND query ILIKE '%INSERT INTO automation_tasks%'"
+            )
+        )
+        db.execute(text("DROP TRIGGER IF EXISTS test_pause_automation_task ON automation_tasks"))
+        db.execute(text("DROP FUNCTION IF EXISTS test_pause_automation_task()"))
+        db.commit()
+
+
+def _task_insert_is_waiting(stack) -> bool:
+    with stack.pg() as db:
+        return bool(
+            db.scalar(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() "
+                    "AND wait_event='PgSleep' AND query ILIKE '%INSERT INTO automation_tasks%')"
+                )
+            )
+        )
+
+
+def _automation_status(stack, execution_id: uuid.UUID) -> ExecutionStatus:
+    with stack.pg() as db:
+        return db.get(AutomationExecution, execution_id).status
+
+
+def _automation_task_count(stack, execution_id: uuid.UUID) -> int:
+    with stack.pg() as db:
+        return int(
+            db.scalar(
+                select(func.count())
+                .select_from(AutomationTask)
+                .where(AutomationTask.execution_id == execution_id)
+            )
+        )
+
+
+def test_killed_during_automation_action_recovers_without_duplicate_task(stack):
+    execution_id = _automation_execution(stack, [{"type": "create_task", "title": "Exactly once"}])
+    _hold_automation_task_insert(stack)
+    first = stack.worker("automation-killed")
+    try:
+        eventually(
+            lambda: _task_insert_is_waiting(stack),
+            what="the automation worker to enter the task side effect",
+        )
+        first.kill()
+        assert _automation_status(stack, execution_id) == ExecutionStatus.QUEUED
+        assert _automation_task_count(stack, execution_id) == 0
+    finally:
+        _remove_automation_task_hold(stack)
+
+    second = stack.worker("automation-recovery")
+    eventually(
+        lambda: _automation_status(stack, execution_id) == ExecutionStatus.COMPLETED,
+        what="the recovered automation execution to complete",
+    )
+    assert _automation_task_count(stack, execution_id) == 1
+
+    # Replaying a delivered job after commit is a no-op and cannot create a second task.
+    stack.queue.enqueue(AutomationExecutionJob(execution_id))
+    eventually(lambda: stack.queue.length() == 0, what="the duplicate execution job to be consumed")
+    assert _automation_task_count(stack, execution_id) == 1
+    assert second.alive
+
+
+def test_automation_wait_survives_worker_restart_and_runs_once(stack):
+    execution_id = _automation_execution(
+        stack,
+        [
+            {"type": "wait", "seconds": 30},
+            {"type": "create_task", "title": "After durable wait"},
+        ],
+    )
+    first = stack.worker("automation-wait")
+    eventually(
+        lambda: _automation_status(stack, execution_id) == ExecutionStatus.WAITING,
+        what="the first worker to persist the scheduled wait",
+    )
+    first.kill()
+    with stack.pg() as db:
+        execution = db.get(AutomationExecution, execution_id)
+        step = db.scalar(
+            select(AutomationExecutionStep).where(
+                AutomationExecutionStep.execution_id == execution_id,
+                AutomationExecutionStep.step_index == 0,
+            )
+        )
+        assert step is not None and step.status == StepStatus.WAITING
+        execution.next_run_at = datetime.now(UTC) - timedelta(seconds=1)
+        step.scheduled_at = execution.next_run_at
+        db.commit()
+
+    restarted = stack.worker("automation-after-wait")
+    eventually(
+        lambda: _automation_status(stack, execution_id) == ExecutionStatus.COMPLETED,
+        what="the restarted worker to recover and finish the delayed execution",
+    )
+    assert _automation_task_count(stack, execution_id) == 1
+    assert restarted.alive
+
+
+def test_postgres_outage_during_automation_action_recovers_without_duplicate_task(stack):
+    execution_id = _automation_execution(
+        stack, [{"type": "create_task", "title": "After database returns"}]
+    )
+    _hold_automation_task_insert(stack)
+    proxy = stack.proxy("localhost", 5432)
+    database_url = TEST_DATABASE_URL.replace("localhost:5432", f"127.0.0.1:{proxy.port}")
+    worker = stack.worker("automation-db-outage", DATABASE_URL=database_url)
+    try:
+        eventually(
+            lambda: _task_insert_is_waiting(stack),
+            what="the automation worker to enter the database side effect",
+        )
+        proxy.cut()
+        eventually(
+            lambda: "job crashed" in worker.logs(),
+            what="the database failure to be contained by the worker",
+        )
+        assert worker.alive
+        proxy.restore()
+    finally:
+        _remove_automation_task_hold(stack)
+
+    assert _automation_status(stack, execution_id) == ExecutionStatus.QUEUED
+    recovery = stack.worker("automation-db-recovery")
+    eventually(
+        lambda: _automation_status(stack, execution_id) == ExecutionStatus.COMPLETED,
+        what="a worker to recover the queued execution after PostgreSQL returns",
+    )
+    assert _automation_task_count(stack, execution_id) == 1
+    assert worker.alive and recovery.alive
+
+
+def test_automation_event_persisted_during_redis_outage_is_recovered_from_postgres(stack):
+    event_key = uuid.uuid4()
+    with stack.pg() as db:
+        workflow = AutomationWorkflow(
+            organization_id=stack.org_id,
+            name=f"Redis recovery {event_key}",
+            status=WorkflowStatus.ACTIVE,
+            version=1,
+            definition={
+                "trigger": {"event": "order_created"},
+                "conditions": [],
+                "actions": [{"type": "create_task", "title": "After Redis returns"}],
+            },
+        )
+        db.add(workflow)
+        db.commit()
+        unavailable = RedisJobQueue(
+            "redis://127.0.0.1:1/0", key=f"bizflow:test:offline:{event_key}", socket_timeout=0.2
+        )
+        try:
+            with pytest.raises(redis.RedisError):
+                automation.ingest_event(
+                    db,
+                    unavailable,
+                    organization_id=stack.org_id,
+                    event_type="order_created",
+                    source="internal",
+                    source_id=str(event_key),
+                    dedupe_key=f"redis-outage:{event_key}",
+                    payload={},
+                )
+        finally:
+            unavailable.close()
+        event = db.scalar(
+            select(AutomationEvent).where(AutomationEvent.dedupe_key == f"redis-outage:{event_key}")
+        )
+        assert event is not None and event.status == EventStatus.PENDING
+        event_id = event.id
+
+    worker = stack.worker("automation-redis-recovery")
+    eventually(
+        lambda: (
+            _automation_event_status(stack, event_id) == EventStatus.PROCESSED
+            and _automation_execution_for_event(stack, event_id) == ExecutionStatus.COMPLETED
+        ),
+        what="the maintenance loop to requeue and execute the persisted event after Redis returns",
+    )
+    execution_id = _automation_execution_id(stack, event_id)
+    assert _automation_task_count(stack, execution_id) == 1
+    assert worker.alive
+
+
+def _automation_event_status(stack, event_id: uuid.UUID) -> EventStatus:
+    with stack.pg() as db:
+        return db.get(AutomationEvent, event_id).status
+
+
+def _automation_execution_for_event(stack, event_id: uuid.UUID) -> ExecutionStatus | None:
+    with stack.pg() as db:
+        return db.scalar(
+            select(AutomationExecution.status).where(AutomationExecution.event_id == event_id)
+        )
+
+
+def _automation_execution_id(stack, event_id: uuid.UUID) -> uuid.UUID:
+    with stack.pg() as db:
+        return db.scalar(
+            select(AutomationExecution.id).where(AutomationExecution.event_id == event_id)
+        )
 
 
 # --- stopping politely ---------------------------------------------------------------------------------------------------

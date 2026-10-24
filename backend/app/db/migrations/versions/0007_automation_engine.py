@@ -147,6 +147,9 @@ def upgrade() -> None:
         sa.UniqueConstraint("id", "organization_id", name="uq_automation_executions_id_org"),
     )
     op.create_index(
+        "ix_automation_executions_event_id", "automation_executions", ["event_id"]
+    )
+    op.create_index(
         "ix_automation_executions_organization_id", "automation_executions", ["organization_id"]
     )
     op.create_index(
@@ -274,6 +277,7 @@ def downgrade() -> None:
     op.drop_table("automation_tasks")
     op.drop_table("website_leads")
     op.drop_table("automation_execution_steps")
+    op.drop_index("ix_automation_executions_event_id", table_name="automation_executions")
     op.drop_table("automation_executions")
     op.drop_table("automation_events")
     op.drop_table("automation_workflows")

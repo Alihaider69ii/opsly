@@ -208,14 +208,16 @@ Verification (final numbers in [production.md](production.md#16-verification-res
 - Not verified: a real Shopify store, real webhooks, protected customer data approval, any AI vendor
   with a real key (EXTERNALLY BLOCKED; runbooks provided), and database encryption at rest (operator).
 
-## Phase 5: Automation engine (implementation underway)
+## Phase 5: Automation engine (repository verification complete)
 
 Current implementation and resumable checklist: [phase-5-progress.md](phase-5-progress.md).
 Architecture and limitations: [automation.md](automation.md). Tenant-scoped workflow/event/execution
 models, typed evaluation, existing-worker scheduling/recovery, Shopify event conversion, optional
-website lead capture and a minimal dashboard have been added. Phase 5 has **not** passed its
-PostgreSQL/Redis migration and integration, browser E2E, failure-injection or mutation gates; do not
-consider the phase complete.
+website lead capture and a minimal dashboard are implemented. Phase 5 repository gates passed:
+PostgreSQL/Redis integration, migration cycle/check, worker recovery and failure injection, browser
+E2E, security/tenant isolation, 151/151 mutation checks, backend regression, frontend/widget checks
+and static analysis. See [phase-5-progress.md](phase-5-progress.md) for exact counts and external
+limitations. Live Shopify/AI/messaging delivery remains unverified and requires external credentials.
 
 ## Later backlog (in order)
 

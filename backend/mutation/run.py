@@ -21,12 +21,13 @@ import time
 from pathlib import Path
 
 from mutation.catalog import M as PHASE_4
+from mutation.catalog_5 import M as PHASE_5
 from mutation.catalog_41 import M as PHASE_4_1
 from mutation.expected import EXPECTED_SURVIVORS
 
 BACKEND = Path(__file__).resolve().parents[1]
 RESULTS = Path(__file__).with_name("results.json")
-MUTANTS = [*PHASE_4, *PHASE_4_1]
+MUTANTS = [*PHASE_4, *PHASE_4_1, *PHASE_5]
 
 
 def tree_hash() -> str:
