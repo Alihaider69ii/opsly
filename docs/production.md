@@ -336,6 +336,14 @@ CRITICAL or HIGH is resolved. Nothing CRITICAL was found.
 
 ## 16. Verification results (final run, 23 October 2026)
 
+Those results describe the Phase 4.1 baseline and do not certify Phase 5. The Phase 5 automation
+implementation is underway; its current local checks, unavailable infrastructure checks and exact
+remaining production gates are tracked in [phase-5-progress.md](phase-5-progress.md), with design
+details in [automation.md](automation.md). In this environment PostgreSQL/Redis could not be started
+because the Docker Desktop engine was unavailable, so migration-cycle, integration, worker failure
+injection, browser E2E and mutation results are not established for Phase 5. Do not infer Phase 5
+production readiness from the Phase 4.1 table below.
+
 All of the below ran on the final tree. The same commands are in section 14.
 
 | Check | Result |

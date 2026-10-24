@@ -3,7 +3,8 @@
 AI automation layer for D2C / e-commerce businesses: connects a brand's Shopify store, website and
 WhatsApp Business account, and uses AI to answer customers, capture leads and run follow-ups.
 
-Status: **Phase 4.1 complete** (authentication, organization tenancy, knowledge base and website
+Status: **Phase 4.1 baseline complete; Phase 5 implementation underway and not yet production-gated**
+(authentication, organization tenancy, knowledge base and website
 crawler, AI brain with RAG, an embeddable website chat widget, vendor-neutral AI providers, a Shopify
 integration that imports products, customers and orders, and the production hardening around all of
 it). **Not yet run against a real Shopify store or a real AI vendor account** (no credentials exist in
@@ -204,11 +205,16 @@ not part of CI. Live verification against a real Shopify store or AI vendor is a
 
 ```bash
 cd backend
-alembic upgrade head                                  # apply (0003 pgvector, 0004 chat, 0005 Shopify, 0006 FK indexes)
+alembic upgrade head                                  # includes 0007 automation engine
 alembic downgrade -1                                  # roll back one revision
 alembic revision --autogenerate -m "describe change"  # create (review the output!)
 alembic check                                         # fail if models and DB drift
 ```
+
+Phase 5 automation APIs, event/execution model, worker recovery, website lead capture, current
+verification status and limitations are documented in [docs/automation.md](docs/automation.md) and
+[docs/phase-5-progress.md](docs/phase-5-progress.md). Phase 5 has not passed its PostgreSQL/Redis,
+browser E2E, failure-injection or mutation gates; do not treat it as production-ready.
 
 ## Environment variables
 

@@ -17,6 +17,11 @@ export const STYLES = `
 .bf-retry { border: 1px solid #991b1b; background: #fff; color: #991b1b; border-radius: 6px; padding: 4px 8px; cursor: pointer; white-space: nowrap; }
 .bf-status { min-height: 18px; padding: 0 14px; font-size: 12px; color: #52525b; }
 .bf-form { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #e4e4e7; background: #fff; }
+.bf-lead-toggle { align-self: flex-start; margin: 4px 10px; border: 0; background: transparent; color: #52525b; text-decoration: underline; font: inherit; font-size: 12px; cursor: pointer; }
+.bf-lead-form { display: grid; gap: 6px; padding: 8px 10px; border-top: 1px solid #e4e4e7; background: #fff; }
+.bf-lead-send { border: 0; border-radius: 8px; background: #18181b; color: #fff; padding: 7px 12px; cursor: pointer; }
+.bf-lead-input { width: 100%; box-sizing: border-box; border: 1px solid #d4d4d8; border-radius: 6px; padding: 7px; font: inherit; }
+.bf-consent { display: flex; align-items: center; gap: 6px; color: #52525b; font-size: 11px; }
 .bf-input { flex: 1; resize: none; border: 1px solid #d4d4d8; border-radius: 8px; padding: 8px; font: inherit; max-height: 96px; }
 .bf-input:disabled { background: #f4f4f5; }
 .bf-send { border: 0; border-radius: 8px; background: #18181b; color: #fff; padding: 0 14px; cursor: pointer; }

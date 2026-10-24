@@ -94,7 +94,7 @@ query ProductVariants($id: ID!, $first: Int!, $after: String) {
 )
 
 _CUSTOMER_FIELDS = """
-  id firstName lastName createdAt updatedAt state
+  id firstName lastName tags createdAt updatedAt state
   defaultEmailAddress { emailAddress marketingState }
   defaultPhoneNumber { phoneNumber }
 """

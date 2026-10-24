@@ -8,6 +8,7 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from app.api.auth.router import router as auth_router
+from app.api.automations import router as automations_router
 from app.api.chat.router import router as chat_router
 from app.api.health.router import router as health_router
 from app.api.integrations.shopify import router as shopify_router
@@ -92,6 +93,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health_router)
     app.include_router(auth_router, prefix="/api")
+    app.include_router(automations_router, prefix="/api")
     app.include_router(organizations_router, prefix="/api")
     app.include_router(knowledge_router, prefix="/api")
     app.include_router(chat_router, prefix="/api")

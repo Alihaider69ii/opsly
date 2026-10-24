@@ -121,6 +121,7 @@ function createApi({ base, key, fetchImpl }) {
         token,
       }),
     getConversation: (conversationId, token) => request(`/conversations/${encodeURIComponent(conversationId)}`, { token }),
+    captureLead: (conversationId, token, contact) => request("/leads", { method: "POST", body: { conversation_id: conversationId, ...contact }, token }),
   };
 }
 
@@ -228,7 +229,22 @@ async function mount(options, isCurrent) {
   send.textContent = "Send";
   form.append(input, send);
 
-  panel.append(header, log, status, form);
+  const leadToggle = el(doc, "button", "bf-lead-toggle", { type: "button" });
+  leadToggle.textContent = "Leave contact details (optional)";
+  const leadForm = el(doc, "form", "bf-lead-form", { hidden: "" });
+  const leadName = el(doc, "input", "bf-lead-input", { name: "name", maxlength: "255", placeholder: "Name (optional)", "aria-label": "Name (optional)" });
+  const leadEmail = el(doc, "input", "bf-lead-input", { name: "email", maxlength: "320", type: "email", placeholder: "Email", "aria-label": "Email" });
+  const leadPhone = el(doc, "input", "bf-lead-input", { name: "phone", maxlength: "50", type: "tel", placeholder: "Phone", "aria-label": "Phone" });
+  const consentLabel = el(doc, "label", "bf-consent");
+  const consent = el(doc, "input", "", { name: "marketing_consent", type: "checkbox" });
+  const consentText = doc.createElement("span");
+  consentText.textContent = "I agree to receive follow-up messages";
+  consentLabel.append(consent, consentText);
+  const leadSubmit = el(doc, "button", "bf-lead-send", { type: "submit" });
+  leadSubmit.textContent = "Share details";
+  leadForm.append(leadName, leadEmail, leadPhone, consentLabel, leadSubmit);
+
+  panel.append(header, log, status, leadToggle, leadForm, form);
   root.append(launcher, panel);
   shadow.append(style, root);
 
@@ -382,6 +398,34 @@ async function mount(options, isCurrent) {
     if (!text.trim() || busy) return;
     input.value = "";
     submit(text);
+  });
+  leadToggle.addEventListener("click", () => {
+    leadForm.hidden = !leadForm.hidden;
+    if (!leadForm.hidden) leadEmail.focus();
+  });
+  leadForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    leadSubmit.disabled = true;
+    status.textContent = "Saving your contact details...";
+    try {
+      await ensureConversation();
+      await api.captureLead(conversation.id, conversation.token, {
+        name: leadName.value.trim() || null,
+        email: leadEmail.value.trim() || null,
+        phone: leadPhone.value.trim() || null,
+        marketing_consent: consent.checked,
+      });
+      leadForm.hidden = true;
+      status.textContent = "Thanks. Your contact details were saved.";
+      leadName.value = leadEmail.value = leadPhone.value = "";
+      consent.checked = false;
+    } catch (error) {
+      const kind = error instanceof ApiError ? error.kind : "generic";
+      status.textContent = kind === "rejected" ? "Enter a valid email or phone number." : ERRORS[kind] || ERRORS.generic;
+    } finally {
+      leadSubmit.disabled = false;
+    }
   });
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {

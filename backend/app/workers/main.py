@@ -25,6 +25,7 @@ from app.core.request_context import RequestIdFilter, set_request_id
 from app.core.secrets import SecretError, SecretManager
 from app.core.startup_checks import enforce_startup
 from app.db.database import SessionLocal
+from app.services import automation
 from app.services.ai.factory import build_embedding_provider
 from app.services.crawler.crawler import CrawlLimits
 from app.services.crawler.factory import build_fetcher, build_limits
@@ -37,7 +38,15 @@ from app.services.knowledge.crawl_runner import (
     run_crawl,
 )
 from app.workers.heartbeat import WorkerHeartbeat
-from app.workers.queue import CrawlJob, Job, RedisJobQueue, ShopifySyncJob, ShopifyWebhookJob
+from app.workers.queue import (
+    AutomationEventJob,
+    AutomationExecutionJob,
+    CrawlJob,
+    Job,
+    RedisJobQueue,
+    ShopifySyncJob,
+    ShopifyWebhookJob,
+)
 
 logger = logging.getLogger("bizflow.worker")
 
@@ -82,6 +91,12 @@ def run_job(
         )
         logger.info("job finished source=%s outcome=%s", job.source_id, outcome)
         return outcome
+    if isinstance(job, AutomationEventJob):
+        with SessionLocal() as db:
+            return f"automation_events:{automation.dispatch_event(db, job.event_id, queue)}"
+    if isinstance(job, AutomationExecutionJob):
+        with SessionLocal() as db:
+            return automation.run_execution(db, job.execution_id, queue)
     if runtime is None:
         logger.error("shopify job dropped: SECRET_ENCRYPTION_KEY is not usable")
         return "dropped"
@@ -94,7 +109,7 @@ def run_job(
         )
         return outcome
     if isinstance(job, ShopifyWebhookJob):
-        outcome = webhooks.process_event(runtime, SessionLocal, job.event_id)
+        outcome = webhooks.process_event(runtime, SessionLocal, job.event_id, queue)
         logger.info("shopify webhook job finished event=%s outcome=%s", job.event_id, outcome)
         return outcome
     return "ignored"  # pragma: no cover (parse_job only produces the types above)
@@ -107,6 +122,10 @@ def job_label(job: Job) -> str:
         return f"sync:{job.connection_id}"
     if isinstance(job, ShopifyWebhookJob):
         return f"webhook:{job.event_id}"
+    if isinstance(job, AutomationEventJob):
+        return f"automation-event:{job.event_id}"
+    if isinstance(job, AutomationExecutionJob):
+        return f"automation-execution:{job.execution_id}"
     return "job"  # pragma: no cover
 
 
@@ -207,6 +226,7 @@ def maintain(
         ),
         lambda: sync.requeue_orphaned_sync(SessionLocal, queue, ORPHANED_PENDING_AFTER_SECONDS),
         lambda: webhooks.requeue_pending_events(SessionLocal, queue, ORPHANED_EVENT_AFTER_SECONDS),
+        lambda: _recover_automation(queue),
         lambda: webhooks.prune_old_events(SessionLocal, settings.shopify_webhook_retention_days),
         lambda: lifecycle.finish_pending_purges(SessionLocal),
     ]
@@ -219,6 +239,13 @@ def maintain(
             step()
         except Exception:
             logger.exception("maintenance step failed")
+
+
+def _recover_automation(queue: RedisJobQueue) -> int:
+    with SessionLocal() as db:
+        events = automation.requeue_pending_events(db, queue)
+        executions = automation.recover_due(db, queue)
+        return events + executions
 
 
 if __name__ == "__main__":

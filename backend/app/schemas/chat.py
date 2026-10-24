@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator, model_validator
 
 _ORIGIN_RE = re.compile(r"^https?://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$")
 MAX_ALLOWED_ORIGINS = 20
@@ -26,6 +26,43 @@ class ConversationCreated(BaseModel):
 class MessageCreate(BaseModel):
     conversation_id: uuid.UUID
     content: RawMessage
+
+
+class LeadCapture(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    conversation_id: uuid.UUID
+    name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=255)] | None = None
+    email: Annotated[str, StringConstraints(strip_whitespace=True, max_length=320)] | None = None
+    phone: Annotated[str, StringConstraints(strip_whitespace=True, max_length=50)] | None = None
+    marketing_consent: bool = False
+
+    @model_validator(mode="after")
+    def _contact_required(self) -> "LeadCapture":
+        if not self.email and not self.phone:
+            raise ValueError("Provide an email address or phone number")
+        return self
+
+    @field_validator("email")
+    @classmethod
+    def _email_shape(cls, value: str | None) -> str | None:
+        if value is not None:
+            value = value.lower()
+            if (
+                value.count("@") != 1
+                or "." not in value.rsplit("@", 1)[-1]
+                or any(c.isspace() for c in value)
+            ):
+                raise ValueError("Enter a valid email address")
+        return value
+
+    @field_validator("phone")
+    @classmethod
+    def _phone_shape(cls, value: str | None) -> str | None:
+        if value is not None:
+            digits = sum(char.isdigit() for char in value)
+            if digits < 7 or len(value) > 50:
+                raise ValueError("Enter a valid phone number")
+        return value
 
 
 class MessageOut(BaseModel):

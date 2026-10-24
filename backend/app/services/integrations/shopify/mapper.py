@@ -62,6 +62,7 @@ class CustomerData:
     first_name: str | None
     last_name: str | None
     accepts_marketing: bool | None
+    tags: list[str]
     shopify_created_at: datetime | None
     shopify_updated_at: datetime | None
 
@@ -246,6 +247,12 @@ def map_customer(node: Any) -> CustomerData | None:
         return None
     email = node.get("defaultEmailAddress")
     phone = node.get("defaultPhoneNumber")
+    raw_tags = node.get("tags")
+    tags = (
+        [tag for tag in (text(item, 255) for item in raw_tags[:MAX_TAGS]) if tag]
+        if isinstance(raw_tags, Sequence) and not isinstance(raw_tags, str)
+        else []
+    )
     return CustomerData(
         shopify_customer_id=customer_id,
         email=text(email.get("emailAddress"), 320) if isinstance(email, Mapping) else None,
@@ -253,6 +260,7 @@ def map_customer(node: Any) -> CustomerData | None:
         first_name=text(node.get("firstName")),
         last_name=text(node.get("lastName")),
         accepts_marketing=_accepts_marketing(email),
+        tags=tags,
         shopify_created_at=timestamp(node.get("createdAt")),
         shopify_updated_at=timestamp(node.get("updatedAt")),
     )

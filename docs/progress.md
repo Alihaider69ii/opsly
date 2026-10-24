@@ -208,9 +208,18 @@ Verification (final numbers in [production.md](production.md#16-verification-res
 - Not verified: a real Shopify store, real webhooks, protected customer data approval, any AI vendor
   with a real key (EXTERNALLY BLOCKED; runbooks provided), and database encryption at rest (operator).
 
+## Phase 5: Automation engine (implementation underway)
+
+Current implementation and resumable checklist: [phase-5-progress.md](phase-5-progress.md).
+Architecture and limitations: [automation.md](automation.md). Tenant-scoped workflow/event/execution
+models, typed evaluation, existing-worker scheduling/recovery, Shopify event conversion, optional
+website lead capture and a minimal dashboard have been added. Phase 5 has **not** passed its
+PostgreSQL/Redis migration and integration, browser E2E, failure-injection or mutation gates; do not
+consider the phase complete.
+
 ## Later backlog (in order)
 
-WhatsApp, the automation engine, leads/customers, using the imported Shopify data in the assistant
+WhatsApp, using the imported Shopify data in the assistant
 (product questions, order status), real dashboard data.
 
 AI follow-ups: streaming replies and an async LLM client, a tool-calling registry, conversation

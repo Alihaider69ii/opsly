@@ -7,19 +7,23 @@ or disabled, all identical), and every later query is scoped to that widget's or
 
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import DbSession
 from app.core.config import Settings, get_settings
 from app.core.rate_limit import client_ip, rate_limit
-from app.db.models import ChatWidget, Organization
+from app.db.models import ChatWidget, Organization, WebsiteLead
 from app.schemas.chat import (
     ChatReply,
     ConversationCreate,
     ConversationCreated,
     ConversationOut,
+    LeadCapture,
     MessageCreate,
     MessageOut,
     WidgetPublicConfig,
@@ -28,6 +32,7 @@ from app.services.ai.agent import AssistantUnavailable, ChatAgent
 from app.services.ai.factory import get_embedding_provider, get_llm_provider
 from app.services.ai.provider import AIError
 from app.services.chat import service
+from app.workers.queue import JobQueue, get_job_queue
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +107,7 @@ def get_chat_agent(settings: AppSettings) -> ChatAgent:
 
 Agent = Annotated[ChatAgent, Depends(get_chat_agent)]
 ConversationToken = Annotated[str | None, Header(alias="X-Conversation-Token")]
+Queue = Annotated[JobQueue, Depends(get_job_queue)]
 
 
 def _message_out(message) -> MessageOut:
@@ -175,6 +181,75 @@ def send_message(
     except AssistantUnavailable:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, UNAVAILABLE) from None
     return ChatReply(conversation_id=body.conversation_id, message=_message_out(assistant))
+
+
+@router.post("/leads", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(_message_limit)])
+def capture_lead(
+    body: LeadCapture,
+    widget: PublicWidget,
+    db: DbSession,
+    queue: Queue,
+    token: ConversationToken = None,
+) -> dict[str, str]:
+    try:
+        conversation = service.get_conversation(db, widget, body.conversation_id, token)
+    except service.ConversationNotFound:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found") from None
+    lead = db.scalar(
+        select(WebsiteLead).where(WebsiteLead.conversation_id == conversation.id).with_for_update()
+    )
+    if lead is None:
+        lead = WebsiteLead(
+            organization_id=widget.organization_id,
+            conversation_id=conversation.id,
+            created_at=datetime.now(UTC),
+        )
+        db.add(lead)
+    lead.name = body.name
+    lead.email = body.email
+    lead.phone = body.phone
+    lead.marketing_consent = body.marketing_consent
+    lead.consent_source = "website_chat"
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        lead = db.scalar(
+            select(WebsiteLead)
+            .where(
+                WebsiteLead.conversation_id == conversation.id,
+                WebsiteLead.organization_id == widget.organization_id,
+            )
+            .with_for_update()
+        )
+        if lead is None:
+            raise
+        lead.name = body.name
+        lead.email = body.email
+        lead.phone = body.phone
+        lead.marketing_consent = body.marketing_consent
+        db.commit()
+    from app.services.automation import ingest_event
+
+    ingest_event(
+        db,
+        queue,
+        organization_id=widget.organization_id,
+        event_type="website_lead_captured",
+        source="website",
+        source_id=str(conversation.id),
+        dedupe_key=f"website-lead:{conversation.id}",
+        payload={
+            "customer": {
+                "exists": True,
+                "lead_id": str(lead.id),
+                "email": bool(body.email),
+                "phone": bool(body.phone),
+                "marketing_consent": body.marketing_consent,
+            }
+        },
+    )
+    return {"status": "captured"}
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationOut)

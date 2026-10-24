@@ -23,12 +23,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.db.models import (
+    Customer,
+    Order,
+    OrderItem,
+    Product,
+    ProductVariant,
     ShopifyConnection,
     ShopifyConnectionStatus,
     ShopifyWebhookEvent,
@@ -364,7 +369,12 @@ def _apply(
         db.commit()
 
 
-def process_event(rt: ShopifyRuntime, session_factory: SessionFactory, event_id: uuid.UUID) -> str:
+def process_event(
+    rt: ShopifyRuntime,
+    session_factory: SessionFactory,
+    event_id: uuid.UUID,
+    queue: JobQueue | None = None,
+) -> str:
     """Run one stored webhook event. Returns ``skipped`` (not claimable), ``processed``,
     ``ignored``, ``retry`` (transient failure, retried later) or ``failed``."""
     event = _claim(session_factory, event_id)
@@ -387,7 +397,6 @@ def process_event(rt: ShopifyRuntime, session_factory: SessionFactory, event_id:
         _finish(session_factory, event_id, WebhookEventStatus.IGNORED, "unknown_store")
         return "ignored"
     connection_id, organization_id, shop_domain, currency, status = info
-
     try:
         topic = event.topic
         if topic == "app/uninstalled":
@@ -433,8 +442,163 @@ def process_event(rt: ShopifyRuntime, session_factory: SessionFactory, event_id:
         logger.exception("webhook processing crashed event=%s", event_id)
         _finish(session_factory, event_id, WebhookEventStatus.FAILED, "internal_error")
         return "failed"
+    # Commit the internal deduplicated event before marking the source delivery processed. If the
+    # process dies between these operations, Shopify recovery repeats the source event and the
+    # internal event's unique idempotency key makes the conversion harmless.
+    if queue is not None:
+        _emit_automation_event(
+            session_factory,
+            queue,
+            organization_id,
+            event.topic,
+            event.webhook_id,
+            event.resource_id,
+        )
     _finish(session_factory, event_id, WebhookEventStatus.PROCESSED)
     return "processed"
+
+
+def _emit_automation_event(
+    session_factory, queue, organization_id, topic, webhook_id, resource_id
+) -> None:
+    """Publish only normalized fields from the authoritative post-webhook database rows."""
+    from app.services.automation import ingest_event
+
+    mapping = {
+        "orders/create": "order_created",
+        "orders/cancelled": "order_cancelled",
+        "customers/create": "customer_created",
+        "customers/update": "customer_updated",
+        "products/create": "product_created",
+        "products/update": "product_updated",
+    }
+    event_type = mapping.get(topic)
+    payload: dict[str, Any] = {"event": {"source": "shopify"}}
+    with session_factory() as db:
+        if topic == "orders/updated" and resource_id is not None:
+            order = db.scalar(
+                select(Order).where(
+                    Order.organization_id == organization_id, Order.shopify_order_id == resource_id
+                )
+            )
+            if order is not None and order.financial_status == "paid":
+                event_type = "order_paid"
+            elif order is not None and order.fulfillment_status == "fulfilled":
+                event_type = "order_fulfilled"
+        if event_type is None:
+            return
+        if topic.startswith("orders/") and resource_id is not None:
+            order = db.scalar(
+                select(Order).where(
+                    Order.organization_id == organization_id, Order.shopify_order_id == resource_id
+                )
+            )
+            if order is not None:
+                payload["order"] = {
+                    "total": str(order.total) if order.total is not None else None,
+                    "exists": True,
+                }
+                skus = list(
+                    db.scalars(
+                        select(OrderItem.sku)
+                        .where(
+                            OrderItem.organization_id == organization_id,
+                            OrderItem.order_id == order.id,
+                        )
+                        .limit(100)
+                    )
+                )
+                payload["order"]["sku"] = [sku for sku in skus if sku]
+                payload["order"]["count"] = (
+                    int(
+                        db.scalar(
+                            select(func.count(Order.id)).where(
+                                Order.organization_id == organization_id,
+                                Order.customer_id == order.customer_id,
+                            )
+                        )
+                        or 0
+                    )
+                    if order.customer_id is not None
+                    else 1
+                )
+                payload["customer"] = {
+                    "exists": order.customer_id is not None,
+                    "id": str(order.customer_id) if order.customer_id else None,
+                }
+                if order.customer_id is not None:
+                    customer = db.scalar(
+                        select(Customer).where(
+                            Customer.id == order.customer_id,
+                            Customer.organization_id == organization_id,
+                        )
+                    )
+                    payload["customer"].update(
+                        {
+                            "email": bool(customer and customer.email),
+                            "phone": bool(customer and customer.phone),
+                            "tags": list(customer.tags or []) if customer else [],
+                        }
+                    )
+        elif topic.startswith("customers/") and resource_id is not None:
+            customer = db.scalar(
+                select(Customer).where(
+                    Customer.organization_id == organization_id,
+                    Customer.shopify_customer_id == resource_id,
+                )
+            )
+            payload["customer"] = {
+                "exists": customer is not None,
+                "id": str(customer.id) if customer else None,
+                "email": bool(customer and customer.email),
+                "phone": bool(customer and customer.phone),
+                "tags": list(customer.tags or []) if customer else [],
+            }
+        elif topic.startswith("products/") and resource_id is not None:
+            product = db.scalar(
+                select(Product).where(
+                    Product.organization_id == organization_id,
+                    Product.shopify_product_id == resource_id,
+                )
+            )
+            if product is not None:
+                payload["product"] = {
+                    "category": product.product_type,
+                    "sku": list(
+                        db.scalars(
+                            select(ProductVariant.sku)
+                            .where(
+                                ProductVariant.organization_id == organization_id,
+                                ProductVariant.product_id == product.id,
+                            )
+                            .limit(100)
+                        )
+                    ),
+                }
+        stable_types = {
+            "order_created",
+            "order_paid",
+            "order_fulfilled",
+            "order_delivered",
+            "order_cancelled",
+            "customer_created",
+            "product_created",
+        }
+        dedupe = (
+            f"shopify:{event_type}:{resource_id}"
+            if event_type in stable_types and resource_id is not None
+            else f"shopify:{webhook_id}"
+        )
+        ingest_event(
+            db,
+            queue,
+            organization_id=organization_id,
+            event_type=event_type,
+            source="shopify",
+            source_id=str(resource_id or ""),
+            dedupe_key=dedupe,
+            payload=payload,
+        )
 
 
 # --- maintenance ---------------------------------------------------------------------------------

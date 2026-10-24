@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 CRAWL_QUEUE_KEY = "bizflow:queue:crawl"
 SHOPIFY_WEBHOOK_SUFFIX = ":shopify-webhook"
 SHOPIFY_SYNC_SUFFIX = ":shopify-sync"
+AUTOMATION_SUFFIX = ":automation"
 
 
 @dataclass(frozen=True)
@@ -73,7 +74,23 @@ class ShopifyWebhookJob:
         return json.dumps({"type": "shopify_webhook", "event_id": str(self.event_id)})
 
 
-Job = CrawlJob | ShopifySyncJob | ShopifyWebhookJob
+@dataclass(frozen=True)
+class AutomationEventJob:
+    event_id: uuid.UUID
+
+    def to_json(self) -> str:
+        return json.dumps({"type": "automation_event", "event_id": str(self.event_id)})
+
+
+@dataclass(frozen=True)
+class AutomationExecutionJob:
+    execution_id: uuid.UUID
+
+    def to_json(self) -> str:
+        return json.dumps({"type": "automation_execution", "execution_id": str(self.execution_id)})
+
+
+Job = CrawlJob | ShopifySyncJob | ShopifyWebhookJob | AutomationEventJob | AutomationExecutionJob
 
 
 def parse_job(raw: str) -> Job | None:
@@ -87,6 +104,10 @@ def parse_job(raw: str) -> Job | None:
             return ShopifySyncJob(uuid.UUID(data["connection_id"]))
         if kind == "shopify_webhook":
             return ShopifyWebhookJob(uuid.UUID(data["event_id"]))
+        if kind == "automation_event":
+            return AutomationEventJob(uuid.UUID(data["event_id"]))
+        if kind == "automation_execution":
+            return AutomationExecutionJob(uuid.UUID(data["execution_id"]))
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
     return None
@@ -112,7 +133,12 @@ class RedisJobQueue:
     ) -> None:
         self._key = key
         # Highest priority first: BLPOP serves the first non-empty list in this order.
-        self._keys = [key + SHOPIFY_WEBHOOK_SUFFIX, key, key + SHOPIFY_SYNC_SUFFIX]
+        self._keys = [
+            key + SHOPIFY_WEBHOOK_SUFFIX,
+            key + AUTOMATION_SUFFIX,
+            key,
+            key + SHOPIFY_SYNC_SUFFIX,
+        ]
         self._client: redis.Redis = redis.Redis.from_url(
             url,
             decode_responses=True,
@@ -123,6 +149,8 @@ class RedisJobQueue:
     def _key_for(self, job: Job) -> str:
         if isinstance(job, ShopifyWebhookJob):
             return self._key + SHOPIFY_WEBHOOK_SUFFIX
+        if isinstance(job, (AutomationEventJob, AutomationExecutionJob)):
+            return self._key + AUTOMATION_SUFFIX
         if isinstance(job, ShopifySyncJob):
             return self._key + SHOPIFY_SYNC_SUFFIX
         return self._key

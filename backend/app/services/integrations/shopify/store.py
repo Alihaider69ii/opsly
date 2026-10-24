@@ -272,6 +272,7 @@ def upsert_customers(
                 "first_name": c.first_name,
                 "last_name": c.last_name,
                 "accepts_marketing": c.accepts_marketing,
+                "tags": c.tags,
                 "shopify_created_at": c.shopify_created_at,
                 "shopify_updated_at": c.shopify_updated_at,
                 "deleted_at": None,
@@ -286,6 +287,7 @@ def upsert_customers(
             "first_name",
             "last_name",
             "accepts_marketing",
+            "tags",
             "shopify_created_at",
             "shopify_updated_at",
             "deleted_at",
@@ -326,6 +328,7 @@ def anonymize_customer(
             first_name=None,
             last_name=None,
             accepts_marketing=None,
+            tags=[],
             deleted_at=now,
         )
     )

@@ -1,5 +1,17 @@
 """Import every model here so Base.metadata (used by Alembic) sees all tables."""
 
+from app.db.models.automation import (
+    AutomationEvent,
+    AutomationExecution,
+    AutomationExecutionStep,
+    AutomationTask,
+    AutomationWorkflow,
+    EventStatus,
+    ExecutionStatus,
+    StepStatus,
+    WebsiteLead,
+    WorkflowStatus,
+)
 from app.db.models.chat import (
     ChatWidget,
     Conversation,
@@ -33,6 +45,11 @@ from app.db.models.shopify import (
 from app.db.models.user import User
 
 __all__ = [
+    "AutomationEvent",
+    "AutomationExecution",
+    "AutomationExecutionStep",
+    "AutomationTask",
+    "AutomationWorkflow",
     "ChatWidget",
     "Conversation",
     "ConversationChannel",
@@ -40,6 +57,8 @@ __all__ = [
     "Customer",
     "Document",
     "DocumentStatus",
+    "EventStatus",
+    "ExecutionStatus",
     "KnowledgeChunk",
     "KnowledgeSource",
     "KnowledgeSourceStatus",
@@ -58,9 +77,12 @@ __all__ = [
     "ShopifyOAuthState",
     "ShopifySyncState",
     "ShopifyWebhookEvent",
+    "StepStatus",
     "SyncResource",
     "SyncStatus",
     "User",
     "WebhookEventStatus",
     "WebhookRegistration",
+    "WorkflowStatus",
+    "WebsiteLead",
 ]

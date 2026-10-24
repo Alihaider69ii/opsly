@@ -10,6 +10,7 @@ import type {
   KnowledgeSource,
   Organization,
   ShopifyStatus,
+  AutomationWorkflow,
   User,
 } from "./types";
 
@@ -79,3 +80,5 @@ export const getSourceDocument = cache((id: string, documentId: string) =>
 export const getChatWidget = cache(() => authed<ChatWidget>("/api/chat/widget"));
 
 export const getShopifyStatus = cache(() => authed<ShopifyStatus>("/api/integrations/shopify"));
+
+export const getAutomations = cache(() => authed<AutomationWorkflow[]>("/api/automations"));

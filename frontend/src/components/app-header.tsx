@@ -6,6 +6,7 @@ const links = [
   { href: "/knowledge", label: "Knowledge Base", key: "knowledge" },
   { href: "/website-chat", label: "Website Chat", key: "website-chat" },
   { href: "/integrations/shopify", label: "Shopify", key: "shopify" },
+  { href: "/automations", label: "Automations", key: "automations" },
 ] as const;
 
 export function AppHeader({ current }: { current: (typeof links)[number]["key"] }) {

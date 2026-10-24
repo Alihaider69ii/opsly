@@ -161,6 +161,23 @@ describe("when chat is unavailable nothing is rendered", () => {
 });
 
 describe("sending messages", () => {
+  it("captures contact details only after the visitor submits the optional form", async () => {
+    const { widget, api } = await start({ "POST /leads": ok({ status: "captured" }, 202) });
+    assert.equal(api.calls.length, 1); // config lookup does not mint a customer or lead
+    const view = ui(widget);
+    view.root.querySelector(".bf-lead-toggle").click();
+    const form = view.root.querySelector(".bf-lead-form");
+    form.querySelector('[name="email"]').value = "visitor@example.com";
+    form.querySelector('[name="marketing_consent"]').checked = true;
+    form.requestSubmit();
+    await until(() => api.calls.some((call) => call.path === "/leads"));
+    const capture = api.calls.find((call) => call.path === "/leads");
+    assert.equal(capture.body.email, "visitor@example.com");
+    assert.equal(capture.body.marketing_consent, true);
+    assert.equal(capture.init.headers["X-Conversation-Token"], "tok-1");
+    assert.equal(capture.init.credentials, "omit");
+  });
+
   it("creates a conversation, sends the message and shows the reply", async () => {
     const { widget, api } = await start({ "POST /messages": reply("We ship in two days.") });
     const view = ui(widget);

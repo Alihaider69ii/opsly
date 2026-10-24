@@ -71,14 +71,18 @@ def test_each_job_type_goes_to_its_handler_with_its_own_arguments(monkeypatch, c
     monkeypatch.setattr(
         worker.webhooks,
         "process_event",
-        lambda rt, factory, eid: calls.append(("webhook", eid)) or "processed",
+        lambda rt, factory, eid, _queue=None: calls.append(("webhook", eid, _queue)) or "processed",
     )
     source, connection, event = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     queue = InMemoryJobQueue()
     runtime = object()  # any truthy runtime: the handlers above ignore it
     for job in (CrawlJob(source), ShopifySyncJob(connection), ShopifyWebhookJob(event)):
         worker.run_job(job, queue=queue, **{**ctx, "runtime": runtime})
-    assert calls == [("crawl", source), ("sync", connection), ("webhook", event)]
+    assert calls == [
+        ("crawl", source),
+        ("sync", connection),
+        ("webhook", event, queue),
+    ]
 
 
 def test_shopify_jobs_are_dropped_visibly_when_secure_storage_is_not_usable(ctx, caplog):

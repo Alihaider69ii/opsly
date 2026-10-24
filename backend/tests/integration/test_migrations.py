@@ -77,7 +77,7 @@ def test_upgrade_downgrade_upgrade_cycle_preserves_earlier_data():
 
 def test_there_is_a_single_head_revision():
     script = ScriptDirectory.from_config(alembic_config(TEST_DATABASE_URL))
-    assert script.get_heads() == ["0006"]
+    assert script.get_heads() == ["0007"]
 
 
 def test_models_and_migrated_schema_agree(pg_engine):
@@ -490,7 +490,18 @@ def test_the_whole_chain_runs_up_down_and_up_again_on_an_empty_database():
             r[0]
             for r in rows(engine, "SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
         }
-        assert {"users", "organizations", "products", "shopify_connections"} <= tables_at_head
+        assert {
+            "users",
+            "organizations",
+            "products",
+            "shopify_connections",
+            "automation_workflows",
+            "automation_events",
+            "automation_executions",
+            "automation_execution_steps",
+            "website_leads",
+            "automation_tasks",
+        } <= tables_at_head
 
         command.downgrade(cfg, "base")
         left = {
@@ -505,6 +516,6 @@ def test_the_whole_chain_runs_up_down_and_up_again_on_an_empty_database():
             for r in rows(engine, "SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
         }
         assert again == tables_at_head
-        assert scalar(engine, "SELECT version_num FROM alembic_version") == "0006"
+        assert scalar(engine, "SELECT version_num FROM alembic_version") == "0007"
     finally:
         engine.dispose()

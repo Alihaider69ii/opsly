@@ -27,6 +27,8 @@ PATH = "path"  # organization is in the URL
 
 SOURCE = "{source_id}"
 DOCUMENT = "{document_id}"
+WORKFLOW = "{workflow_id}"
+EXECUTION = "{execution_id}"
 ORG = "{organization_id}"
 
 # (method, path) -> (who may call, how the organization is named, request body)
@@ -70,6 +72,27 @@ POLICY: dict[tuple[str, str], tuple[str, str | None, dict | None]] = {
     ("POST", "/api/public/chat/{public_key}/conversations"): (PUBLIC, None, None),
     ("GET", "/api/public/chat/{public_key}/conversations/{conversation_id}"): (PUBLIC, None, None),
     ("POST", "/api/public/chat/{public_key}/messages"): (PUBLIC, None, None),
+    ("POST", "/api/public/chat/{public_key}/leads"): (PUBLIC, None, None),
+    ("GET", "/api/automations"): (ANY_MEMBER, HEADER, None),
+    ("POST", "/api/automations"): (
+        MANAGER,
+        HEADER,
+        {
+            "name": "Test",
+            "definition": {
+                "trigger": {"type": "customer_created"},
+                "conditions": [],
+                "actions": [{"type": "log"}],
+            },
+        },
+    ),
+    ("GET", f"/api/automations/{WORKFLOW}"): (ANY_MEMBER, HEADER, None),
+    ("PATCH", f"/api/automations/{WORKFLOW}"): (MANAGER, HEADER, {"name": "Renamed"}),
+    ("POST", f"/api/automations/{WORKFLOW}/activate"): (MANAGER, HEADER, None),
+    ("POST", f"/api/automations/{WORKFLOW}/pause"): (MANAGER, HEADER, None),
+    ("POST", f"/api/automations/{WORKFLOW}/archive"): (MANAGER, HEADER, None),
+    ("GET", f"/api/automations/{WORKFLOW}/executions"): (ANY_MEMBER, HEADER, None),
+    ("GET", f"/api/automations/executions/{EXECUTION}"): (ANY_MEMBER, HEADER, None),
     ("POST", "/api/webhooks/shopify"): (PUBLIC, None, None),
     ("GET", "/health"): (PUBLIC, None, None),
     ("GET", "/health/live"): (PUBLIC, None, None),

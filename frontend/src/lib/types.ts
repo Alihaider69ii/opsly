@@ -125,6 +125,32 @@ export type ShopifyStatus = {
   counts: { products: number; variants: number; customers: number; orders: number };
 };
 
+export type AutomationWorkflow = {
+  id: string;
+  name: string;
+  description: string | null;
+  status: "DRAFT" | "ACTIVE" | "PAUSED" | "ARCHIVED";
+  version: number;
+  definition: { trigger: { event: string }; conditions: { field: string; op: string; value?: unknown }[]; actions: Record<string, unknown>[] };
+  created_at: string;
+  updated_at: string;
+  recent_executions?: AutomationExecution[];
+};
+
+export type AutomationExecution = {
+  id: string;
+  workflow_id: string;
+  event_id: string;
+  workflow_version: number;
+  status: string;
+  current_step: number;
+  attempts: number;
+  error_code: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
 // State returned by form Server Actions (consumed with useActionState). Never contains passwords.
 export type FormState = {
   error?: string;

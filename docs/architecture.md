@@ -59,7 +59,7 @@ backend/app/
                                                webhooks, lifecycle (disconnect/purge), service
                      commerce/                 read service over imported products/customers/orders
                    Planned: whatsapp/ leads/ automation/ (integration code stays isolated)
-  workers/         queue.py (Redis job queue: crawl, Shopify sync, Shopify webhook jobs, worker
+  workers/         queue.py (Redis job queue: crawl, Shopify sync, Shopify webhook jobs, automation
                    heartbeats), main.py (the worker process: crash containment, maintenance loop),
                    heartbeat.py / healthcheck.py (liveness for the orchestrator)
 backend/tools/     operator tools, run as `python -m tools.<name>`: ai_live_check,
@@ -367,6 +367,23 @@ dashboard. The honest ledger of what is implemented, verified, live-tested and e
 retry and recovery thresholds, the secrets inventory and the failure-injection results are in
 **[production.md](production.md)**.
 
+## Automation engine (Phase 5 implementation)
+
+The implementation is documented in [automation.md](automation.md). PostgreSQL owns workflow
+definitions, internal events, execution snapshots/steps, durable due times, leads and tasks. The
+existing Redis queue and worker wake and execute persisted work; the worker maintenance pass
+recovers queued, due and stale work. There is no second worker architecture or public event-injection
+route. Shopify webhook processing remains the source of Shopify events and emits deduplicated
+internal events from normalized rows.
+
+Definitions use explicit trigger, condition and action schemas with fail-closed operators. Executions
+retain immutable definition/event snapshots, and tenant-aware composite keys constrain ownership
+in the database. AI content generation uses the existing provider registry and treats event fields
+as untrusted data. Messaging has an explicit provider interface but no configured delivery provider.
+Lead capture is visitor-initiated through the existing website chat and does not promote anonymous
+visitors to customers. `cart_abandoned` is a typed internal trigger only until a supported cart event
+source exists. Phase 5's unverified production gates are tracked in [phase-5-progress.md](phase-5-progress.md).
+
 ## Planned subsystems (not yet built)
 
 - **Tool-calling agent:** the LLM provider interface exists; a tool registry (`search_products`,
@@ -378,9 +395,8 @@ retry and recovery thresholds, the secrets inventory and the failure-injection r
   read the imported tables through `services/commerce`; no agent tool exists yet.
 - **WhatsApp** (`services/whatsapp/`): Meta Cloud API. Each organization connects its own WABA and
   phone number; webhook signature verification; tokens encrypted at rest and never returned by APIs.
-- **Automations:** Trigger, Conditions, Actions, persisted in `automations` / `automation_runs` and
-  executed by workers. Redis + a worker is added when the first delayed action lands.
-- **Leads:** statuses NEW/CONTACTED/QUALIFIED/WON/LOST with a simple rule-based score.
+- **WhatsApp:** real provider delivery, credentials, webhooks and delivery-state handling.
+- **Lead pipeline:** qualification statuses and scoring beyond captured contact records.
 
 ## Security baseline
 

@@ -118,6 +118,7 @@ class Customer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     first_name: Mapped[str | None] = mapped_column(String(255))
     last_name: Mapped[str | None] = mapped_column(String(255))
     accepts_marketing: Mapped[bool | None] = mapped_column(Boolean)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     shopify_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     shopify_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
