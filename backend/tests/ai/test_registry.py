@@ -20,6 +20,7 @@ from app.services.ai.provider import AIRequest, AIResponse, ChatMessage
 from app.services.ai.provider_config import ProviderConfig
 from app.services.ai.providers.anthropic_messages import AnthropicMessagesProvider
 from app.services.ai.providers.fake import FakeEmbeddingProvider, FakeLLMProvider
+from app.services.ai.providers.gemini_embedding import GeminiEmbeddingProvider
 from app.services.ai.providers.openai_compatible import (
     OpenAICompatibleChatProvider,
     OpenAICompatibleEmbeddingProvider,
@@ -91,6 +92,8 @@ def test_the_expected_providers_are_known_and_capabilities_are_not_assumed():
     assert "openrouter" not in default_registry.provider_ids(Capability.EMBEDDING)
     assert "deepseek" not in default_registry.provider_ids(Capability.EMBEDDING)
     assert "openai" in default_registry.provider_ids(Capability.EMBEDDING)
+    assert "gemini" in default_registry.provider_ids(Capability.LLM)
+    assert "gemini" in default_registry.provider_ids(Capability.EMBEDDING)
 
 
 def test_only_the_fake_provider_is_barred_from_production():
@@ -113,6 +116,7 @@ def test_every_llm_preset_builds_through_the_registry(spec):
     expected_class = {
         "openai_compatible": OpenAICompatibleChatProvider,
         "anthropic_messages": AnthropicMessagesProvider,
+        "gemini": OpenAICompatibleChatProvider,  # same protocol and class, just its own adapter key
     }[spec.adapter]
     assert isinstance(built, expected_class)
     assert built.name == spec.id and built.model == "some-model"
@@ -143,7 +147,11 @@ def test_every_embedding_preset_builds_through_the_registry(spec):
     if spec.requires_base_url:
         overrides["embedding_base_url"] = "https://gateway.example/v1"
     built = factory.build_embedding_provider(settings(**overrides))
-    assert isinstance(built, OpenAICompatibleEmbeddingProvider)
+    expected_class = {
+        "openai_compatible": OpenAICompatibleEmbeddingProvider,
+        "gemini": GeminiEmbeddingProvider,
+    }[spec.adapter]
+    assert isinstance(built, expected_class)
     assert built.model_id.startswith(f"{spec.id}")
     assert built.model_id.endswith(":some-embedder")
 
@@ -325,6 +333,11 @@ def test_the_openai_key_is_never_sent_to_another_vendor():
             settings(embedding_provider="together", openai_api_key=SecretStr(KEY))
         )
     assert exc.value.code == AIErrorCode.MISCONFIGURED and KEY not in str(exc.value)
+    with pytest.raises(EmbeddingError) as exc3:  # gemini has no legacy key fallback either
+        factory.build_embedding_provider(
+            settings(embedding_provider="gemini", openai_api_key=SecretStr(KEY))
+        )
+    assert exc3.value.code == AIErrorCode.UNCONFIGURED and KEY not in str(exc3.value)
 
 
 def test_the_specific_key_wins_over_the_legacy_one():
@@ -400,6 +413,21 @@ def test_the_default_url_written_out_explicitly_is_still_the_default_namespace()
         )
     )
     assert explicit.model_id == "openai:text-embedding-3-small"
+
+
+def test_gemini_chat_and_embeddings_use_different_default_endpoints_but_the_default_namespace():
+    llm = resolve_llm_config(settings(llm_provider="gemini", llm_api_key=SecretStr(KEY), llm_model="m"))
+    embedding = resolve_embedding_config(
+        settings(embedding_provider="gemini", embedding_api_key=SecretStr(KEY))
+    )
+    assert llm.base_url == "https://generativelanguage.googleapis.com/v1beta/openai/"
+    assert embedding.base_url == "https://generativelanguage.googleapis.com/v1beta"
+    # the embedding default endpoint is still "the default" for namespacing, not a custom one
+    assert embedding.namespace == "gemini"
+    built = factory.build_embedding_provider(
+        settings(embedding_provider="gemini", embedding_api_key=SecretStr(KEY))
+    )
+    assert built.model_id == "gemini:gemini-embedding-2"  # the catalog default model
 
 
 def test_embedding_dimensions_must_match_the_database_column():

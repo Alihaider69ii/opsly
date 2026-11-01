@@ -37,6 +37,10 @@ class ProviderSpec:
     adapter: str  # which registered adapter implements this provider
     capabilities: frozenset[Capability]
     default_base_url: str | None = None
+    # Only set when embeddings use a different endpoint than chat under the same provider id (for
+    # example Gemini: chat via the OpenAI-compatible layer, embeddings via the native API). Falls
+    # back to ``default_base_url`` when unset, which is every other provider's current behaviour.
+    default_embedding_base_url: str | None = None
     requires_base_url: bool = False
     requires_api_key: bool = True
     default_llm_model: str | None = None
@@ -115,13 +119,20 @@ BUILTIN_PROVIDERS: tuple[ProviderSpec, ...] = (
         default_base_url="https://api.mistral.ai/v1",
     ),
     ProviderSpec(
-        # Google's OpenAI-compatibility layer is documented as beta; its embedding models' width and
-        # ``dimensions`` support are not documented, so embeddings are not claimed.
+        # Chat goes through Google's OpenAI-compatible layer (unchanged). Embeddings do not: Gemini
+        # has no embedding model on that layer, so they call the native ``embedContent`` API instead
+        # -- a different protocol (``x-goog-api-key``, a nested ``content.parts`` body), hence this
+        # row's own adapter key even though chat behaviour is identical to every other
+        # ``openai_compatible`` vendor. ``gemini-embedding-2`` supports a requested output width
+        # (``outputDimensionality``) and 1536 is within its documented range, so it fits the column
+        # exactly with no truncation.
         id="gemini",
-        label="Google Gemini (OpenAI-compatible endpoint)",
-        adapter="openai_compatible",
-        capabilities=_LLM_ONLY,
+        label="Google Gemini",
+        adapter="gemini",
+        capabilities=_BOTH,
         default_base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        default_embedding_base_url="https://generativelanguage.googleapis.com/v1beta",
+        default_embedding_model="gemini-embedding-2",
     ),
     ProviderSpec(
         id="custom_openai_compatible",

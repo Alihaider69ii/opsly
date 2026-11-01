@@ -21,6 +21,7 @@ registry.py  AIProviderRegistry.build_llm  picks the adapter named by spec.adapt
         |
 providers/openai_compatible.py             the adapter: AIRequest -> HTTP -> AIResponse
 providers/anthropic_messages.py            (a different protocol, so a different adapter)
+providers/gemini_embedding.py              (Gemini embeddings: also a different protocol)
 ```
 
 | Piece | File | Responsibility |
@@ -29,7 +30,7 @@ providers/anthropic_messages.py            (a different protocol, so a different
 | `ProviderConfig` | `services/ai/provider_config.py` | Fully resolved settings for one provider: model, base URL, `SecretStr` key, timeout. |
 | `AIProviderRegistry` | `services/ai/registry.py` | The only code that turns a provider id into an implementation. |
 | `resolve_*_config` | `services/ai/registry.py` | The **environment** configuration source (see "Organization-level selection"). |
-| adapters | `services/ai/providers/` | `openai_compatible` (chat and embeddings), `anthropic_messages` (chat), `fake`. Both real adapters share one hardened HTTP client (`_http.py`). |
+| adapters | `services/ai/providers/` | `openai_compatible` (chat and embeddings), `anthropic_messages` (chat), `gemini_embedding` (embeddings only -- Gemini's chat still uses `openai_compatible`), `fake`. All real adapters share one hardened HTTP client (`_http.py`). |
 | `get_llm_provider`, `get_embedding_provider` | `services/ai/factory.py` | Cached entry points for request handling. |
 
 No application code branches on a vendor name. `if provider == "openai"` appears nowhere; vendor
@@ -65,7 +66,7 @@ fails closed instead of corrupting the index).
 | `together` | `openai_compatible` | yes | no | Serves `/embeddings`, but no documented model is 1536 wide. |
 | `deepseek` | `openai_compatible` | yes | no | |
 | `mistral` | `openai_compatible` | yes | no | `mistral-embed` is 1024 wide and uses `output_dimension`, not `dimensions`. |
-| `gemini` | `openai_compatible` | yes | no | Google's OpenAI-compatibility layer is documented as beta; embedding width is not documented. |
+| `gemini` | `openai_compatible` (chat) / `gemini_embedding` (embeddings) | yes | yes | Chat: Google's OpenAI-compatibility layer. Embeddings: `gemini-embedding-2` on Gemini's own `batchEmbedContents` API (not the compatibility layer -- it has no embedding model), requesting `outputDimensionality=1536`. |
 | `custom_openai_compatible` | `openai_compatible` | yes | yes | Any OpenAI-style server: set `*_BASE_URL`; no key required (Ollama, vLLM, LM Studio, a company gateway). **You** are responsible for its embedding model being 1536 wide. |
 | `fake` | `fake` | yes | yes | Deterministic, offline, **not semantic**. Refused when `ENVIRONMENT=production`. |
 
@@ -74,7 +75,7 @@ So "answers from Anthropic, embeddings from OpenAI" is the natural pairing for C
 chat-only here stays chat-only until a 1536-wide model exists for it or the column is widened by a
 migration.
 
-### Adapter behaviour (both real adapters)
+### Adapter behaviour (all real adapters)
 
 * One shared HTTP client: bounded retries with capped backoff (honouring `Retry-After` up to 10 s),
   **no redirects**, environment proxy settings ignored, a **response-size cap (32 MiB of decoded
@@ -87,6 +88,10 @@ migration.
   last turn is not from the user is rejected locally (the API would refuse it); `temperature` is
   clamped to the 0-1 range Anthropic accepts; text blocks are concatenated; a `refusal` stop reason
   maps to `content_filtered`; `generate_stream` reads server-sent events.
+* Gemini embedding specifics: authentication is `x-goog-api-key`, not a bearer token; each text is
+  sent as its own `batchEmbedContents` request item (`{"model", "content": {"parts": [...]}}`)
+  asking for `outputDimensionality=1536`; there is no vendor-specific error body format documented,
+  so failures classify by HTTP status like every other adapter.
 
 ### What is and is not verified
 
@@ -283,5 +288,6 @@ itself), `tests/knowledge/test_embedding_model_change.py` (SQLite) and
   "temporarily unavailable" reply. There is no circuit breaker and no fallback to a second vendor.
 - No per-organization provider settings (above), no cost tracking, no token budgets.
 - **No preset has been exercised against a live vendor account** (EXTERNALLY BLOCKED, see above).
-- Embeddings are OpenAI (or a custom endpoint you vouch for) only, because of the fixed 1536-wide
-  column; supporting other vendors' embeddings needs a migration to a wider or per-model column.
+- Embeddings are OpenAI, Gemini, or a custom endpoint you vouch for, because of the fixed
+  1536-wide column; supporting another vendor's embeddings needs either a documented model that
+  fits that width or a migration to a wider or per-model column.

@@ -31,6 +31,7 @@ from app.services.ai.provider import LLMProvider
 from app.services.ai.provider_config import ProviderConfig
 from app.services.ai.providers.anthropic_messages import AnthropicMessagesProvider
 from app.services.ai.providers.fake import FakeEmbeddingProvider, FakeLLMProvider
+from app.services.ai.providers.gemini_embedding import GeminiEmbeddingProvider
 from app.services.ai.providers.openai_compatible import (
     OpenAICompatibleChatProvider,
     OpenAICompatibleEmbeddingProvider,
@@ -115,6 +116,10 @@ def _builtin_registry() -> AIProviderRegistry:
         "openai_compatible", OpenAICompatibleEmbeddingProvider.from_config
     )
     registry.register_llm_adapter("anthropic_messages", AnthropicMessagesProvider.from_config)
+    # Gemini's chat reuses the OpenAI-compatible adapter (same protocol, unchanged behaviour); its
+    # embeddings do not, hence a dedicated embedding adapter under the same "gemini" key.
+    registry.register_llm_adapter("gemini", OpenAICompatibleChatProvider.from_config)
+    registry.register_embedding_adapter("gemini", GeminiEmbeddingProvider.from_config)
     registry.register_llm_adapter("fake", FakeLLMProvider.from_config)
     registry.register_embedding_adapter("fake", FakeEmbeddingProvider.from_config)
     return registry
@@ -127,9 +132,17 @@ default_registry = _builtin_registry()
 
 
 def _validated_base_url(
-    spec: ProviderSpec, configured: str, env_name: str, error_cls: type[AIError]
+    spec: ProviderSpec,
+    configured: str,
+    env_name: str,
+    error_cls: type[AIError],
+    default: str | None = None,
 ) -> str | None:
-    """The base URL to use: the configured one (validated), else the provider's default.
+    """The base URL to use: the configured one (validated), else a default.
+
+    ``default`` lets a capability use a different fallback than ``spec.default_base_url`` (Gemini's
+    embeddings call a different endpoint than its chat); every other provider leaves it unset and
+    gets the previous behaviour unchanged.
 
     Environment configuration is operator-controlled, so ``http://localhost`` (Ollama, vLLM) is
     allowed. A configuration source that accepts URLs from tenants must additionally apply the
@@ -141,7 +154,7 @@ def _validated_base_url(
             raise error_cls(
                 AIErrorCode.UNCONFIGURED, f"{env_name} is required for provider '{spec.id}'"
             )
-        return spec.default_base_url
+        return default if default is not None else spec.default_base_url
     parts = urlsplit(url)
     if (
         parts.scheme not in ("http", "https")
@@ -240,7 +253,11 @@ def resolve_embedding_config(
         spec=spec,
         model=model,
         base_url=_validated_base_url(
-            spec, settings.embedding_base_url, "EMBEDDING_BASE_URL", EmbeddingError
+            spec,
+            settings.embedding_base_url,
+            "EMBEDDING_BASE_URL",
+            EmbeddingError,
+            default=spec.default_embedding_base_url,
         ),
         api_key=_api_key(
             spec, settings.embedding_api_key, settings, "EMBEDDING_API_KEY", EmbeddingError

@@ -50,9 +50,10 @@ class ProviderConfig:
         For the default OpenAI configuration this is just ``openai``, so vectors written before the
         registry existed keep their ``openai:<model>`` tag and stay valid.
         """
-        if self.base_url is None or (
-            self.spec.default_base_url is not None
-            and _normalize_url(self.base_url) == _normalize_url(self.spec.default_base_url)
+        defaults = (self.spec.default_embedding_base_url, self.spec.default_base_url)
+        if self.base_url is None or any(
+            default is not None and _normalize_url(self.base_url) == _normalize_url(default)
+            for default in defaults
         ):
             return self.spec.id
         digest = hashlib.sha256(_normalize_url(self.base_url).encode()).hexdigest()[:8]
