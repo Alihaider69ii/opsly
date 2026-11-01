@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 from app.services.ai.catalog import non_production_provider_ids
 from app.services.email.catalog import (
@@ -323,6 +324,26 @@ class Settings(BaseSettings):
             if isinstance(value, str) and "://" in value:
                 value = _URL_CREDENTIALS.sub(r"\g<head>:***@", value)
             yield name, value
+
+    @field_validator("database_url")
+    @classmethod
+    def _psycopg_driver(cls, v: str) -> str:
+        """Managed providers (Render among them) hand out a bare ``postgresql://`` or
+        ``postgres://`` URL with no driver qualifier. SQLAlchemy's default dialect for an
+        unqualified ``postgresql://`` is the legacy psycopg2, which this project does not install
+        (it is built on psycopg 3) -- so the unqualified URL would crash at ``create_engine()``
+        with ``ModuleNotFoundError: No module named 'psycopg2'`` instead of connecting. Only the
+        bare scheme is rewritten; an explicitly chosen driver (``+psycopg``, or a deliberate
+        ``+psycopg2``) passes through untouched. Query parameters (``sslmode``, ...), credentials
+        and host are preserved exactly.
+        """
+        try:
+            url = make_url(v)
+        except Exception:  # noqa: BLE001 - not parseable; let downstream validation report it
+            return v
+        if url.drivername in ("postgresql", "postgres"):
+            return url.set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
+        return v
 
     @field_validator("jwt_secret_key")
     @classmethod

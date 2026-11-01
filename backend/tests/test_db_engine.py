@@ -35,3 +35,30 @@ def test_a_postgres_engine_is_built_lazily_without_contacting_the_server():
     )  # TEST-NET, unreachable
     assert engine.dialect.name == "postgresql" and engine.pool._recycle == 1800
     engine.dispose()
+
+
+def test_a_bare_postgresql_url_from_a_managed_provider_still_uses_psycopg_not_psycopg2():
+    # Render (and other managed providers) hand out DATABASE_URL with no driver qualifier.
+    # SQLAlchemy's own default for that is the legacy psycopg2, which this project does not
+    # install -- Settings must rewrite it before create_engine() ever sees it.
+    engine = build_engine(
+        settings("postgresql://u:p@203.0.113.1:5432/db?sslmode=require")
+    )  # TEST-NET, unreachable
+    assert engine.dialect.driver == "psycopg"
+    assert engine.url.render_as_string(hide_password=False) == (
+        "postgresql+psycopg://u:p@203.0.113.1:5432/db?sslmode=require"
+    )
+    engine.dispose()
+
+
+def test_a_heroku_style_bare_postgres_scheme_also_normalizes_to_psycopg():
+    engine = build_engine(settings("postgres://u:p@203.0.113.1:5432/db"))  # TEST-NET, unreachable
+    assert engine.dialect.name == "postgresql" and engine.dialect.driver == "psycopg"
+    engine.dispose()
+
+
+def test_an_explicit_psycopg2_driver_is_left_alone_rather_than_silently_overridden():
+    # Explicitly requesting psycopg2 is a deliberate choice this validator does not second-guess;
+    # it only rewrites the *ambiguous* bare scheme that would otherwise default to psycopg2.
+    settings_ = settings("postgresql+psycopg2://u:p@203.0.113.1:5432/db")
+    assert settings_.database_url == "postgresql+psycopg2://u:p@203.0.113.1:5432/db"
