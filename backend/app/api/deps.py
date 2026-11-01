@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.db.models import OrganizationRole, User
 from app.services.auth.service import AuthenticationError, get_user_from_token
-from app.services.organizations.service import OrgContext, resolve_org_context
+from app.services.organizations.service import (
+    OrgContext,
+    resolve_org_context,
+    resolve_platform_admin_org_context,
+)
 
 DbSession = Annotated[Session, Depends(get_db)]
 
@@ -41,17 +45,39 @@ def current_user(
 CurrentUser = Annotated[User, Depends(current_user)]
 
 
+def platform_admin_user(user: CurrentUser) -> User:
+    """Gate for every /api/platform/* route. Enforced server-side only -- the frontend hiding
+    /admin from a non-admin's nav is cosmetic, this is the actual control (brief section 4)."""
+    if not user.is_platform_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Platform admin access required")
+    return user
+
+
+PlatformAdmin = Annotated[User, Depends(platform_admin_user)]
+
+
 def current_org(
     db: DbSession,
     user: CurrentUser,
     x_organization_id: Annotated[uuid.UUID | None, Header()] = None,
+    x_platform_view_organization_id: Annotated[uuid.UUID | None, Header()] = None,
 ) -> OrgContext:
     """The organization this request acts on, always verified against the user's memberships.
 
     The X-Organization-ID header only *selects among* organizations the user already belongs to;
     an id the user is not a member of is indistinguishable from one that does not exist (404).
     Without the header, the user's earliest membership is used.
+
+    X-Platform-View-Organization-Id (view-as-brand, brief sections 12-14) is a SEPARATE path: it
+    only ever activates when the authenticated user's own ``is_platform_admin`` column is true --
+    a normal brand user sending this header has no effect, since resolve_org_context is still what
+    runs for them. The header can never widen a non-admin's access.
     """
+    if user.is_platform_admin and x_platform_view_organization_id is not None:
+        ctx = resolve_platform_admin_org_context(db, user, x_platform_view_organization_id)
+        if ctx is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+        return ctx
     ctx = resolve_org_context(db, user, x_organization_id)
     if ctx is None:
         if x_organization_id is not None:
@@ -77,8 +103,15 @@ def require_current_org_role(*allowed: OrganizationRole) -> Callable[[OrgContext
 
 def org_from_path(organization_id: uuid.UUID, db: DbSession, user: CurrentUser) -> OrgContext:
     """For routes shaped /organizations/{organization_id}/...: authenticate, verify membership,
-    then resolve. Non-members get 404, never confirming that the organization exists."""
-    ctx = resolve_org_context(db, user, organization_id)
+    then resolve. Non-members get 404, never confirming that the organization exists.
+
+    A platform admin reaches any organization this way too (view-as-brand) -- the id is already
+    explicit in the path, so no extra header is needed for this shape.
+    """
+    if user.is_platform_admin:
+        ctx = resolve_platform_admin_org_context(db, user, organization_id)
+    else:
+        ctx = resolve_org_context(db, user, organization_id)
     if ctx is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
     return ctx

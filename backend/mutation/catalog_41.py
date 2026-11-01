@@ -97,8 +97,8 @@ add(
 add(
     "sg-10-missing-encryption-key-allowed",
     CHECKS,
-    "        SecretManager.from_settings(settings)\n    except SecretError as exc:",
-    "        pass\n    except SecretError as exc:",
+    "    if not settings.shopify_configured:\n        return\n    try:\n        SecretManager.from_settings(settings)\n    except SecretError as exc:",
+    "    if not settings.shopify_configured:\n        return\n    try:\n        pass\n    except SecretError as exc:",
     STARTUP,
 )
 add(

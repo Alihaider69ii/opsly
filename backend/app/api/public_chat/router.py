@@ -180,7 +180,13 @@ def send_message(
         ) from None
     except AssistantUnavailable:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, UNAVAILABLE) from None
-    return ChatReply(conversation_id=body.conversation_id, message=_message_out(assistant))
+    if assistant is None:
+        return ChatReply(
+            conversation_id=body.conversation_id, status="human_handling", message=None
+        )
+    return ChatReply(
+        conversation_id=body.conversation_id, status="ai_replied", message=_message_out(assistant)
+    )
 
 
 @router.post("/leads", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(_message_limit)])
@@ -229,6 +235,54 @@ def capture_lead(
         lead.phone = body.phone
         lead.marketing_consent = body.marketing_consent
         db.commit()
+
+    customer = None
+    if body.email or body.phone:
+        from sqlalchemy import select as _select
+        from sqlalchemy import update as _update
+
+        from app.db.models import SupportChannel, SupportConversation
+        from app.services.support import identity as identity_service
+        from app.services.support import timeline as timeline_service
+
+        customer = identity_service.get_or_create_customer(
+            db,
+            organization_id=widget.organization_id,
+            email=body.email,
+            phone=body.phone,
+            name=body.name,
+        )
+        if body.marketing_consent:
+            customer.email_marketing_consent = True
+        if conversation.customer_id != customer.id:
+            conversation.customer_id = customer.id
+        db.execute(
+            _update(SupportConversation)
+            .where(
+                SupportConversation.organization_id == widget.organization_id,
+                SupportConversation.channel == SupportChannel.WEBSITE,
+                SupportConversation.channel_conversation_id == conversation.id,
+                SupportConversation.customer_id.is_(None),
+            )
+            .values(customer_id=customer.id)
+        )
+        support_conversation_id = db.scalar(
+            _select(SupportConversation.id).where(
+                SupportConversation.organization_id == widget.organization_id,
+                SupportConversation.channel == SupportChannel.WEBSITE,
+                SupportConversation.channel_conversation_id == conversation.id,
+            )
+        )
+        timeline_service.record_event(
+            db,
+            organization_id=widget.organization_id,
+            event_type="consent_changed",
+            customer_id=customer.id,
+            support_conversation_id=support_conversation_id,
+            payload={"marketing_consent": body.marketing_consent, "source": "website_chat"},
+        )
+        db.commit()
+
     from app.services.automation import ingest_event
 
     ingest_event(
@@ -242,6 +296,7 @@ def capture_lead(
         payload={
             "customer": {
                 "exists": True,
+                "id": str(customer.id) if customer else None,
                 "lead_id": str(lead.id),
                 "email": bool(body.email),
                 "phone": bool(body.phone),

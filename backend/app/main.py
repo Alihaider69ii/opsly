@@ -10,12 +10,21 @@ from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from app.api.auth.router import router as auth_router
 from app.api.automations import router as automations_router
 from app.api.chat.router import router as chat_router
+from app.api.email.router import router as email_router
 from app.api.health.router import router as health_router
+from app.api.integrations.email import router as email_integration_router
 from app.api.integrations.shopify import router as shopify_router
+from app.api.integrations.whatsapp import router as whatsapp_integration_router
 from app.api.knowledge.router import router as knowledge_router
+from app.api.operations.router import router as operations_router
 from app.api.organizations.router import router as organizations_router
+from app.api.platform.router import router as platform_router
 from app.api.public_chat.router import router as public_chat_router
+from app.api.support.router import router as support_router
+from app.api.webhooks.email import router as email_webhooks_router
 from app.api.webhooks.shopify import router as shopify_webhooks_router
+from app.api.webhooks.whatsapp import router as whatsapp_webhooks_router
+from app.api.whatsapp.router import router as whatsapp_router
 from app.core.body_limit import RequestBodyLimitMiddleware
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -100,6 +109,15 @@ def create_app() -> FastAPI:
     app.include_router(public_chat_router, prefix="/api")
     app.include_router(shopify_router, prefix="/api")
     app.include_router(shopify_webhooks_router, prefix="/api")
+    app.include_router(whatsapp_integration_router, prefix="/api")
+    app.include_router(whatsapp_router, prefix="/api")
+    app.include_router(whatsapp_webhooks_router, prefix="/api")
+    app.include_router(email_integration_router, prefix="/api")
+    app.include_router(email_router, prefix="/api")
+    app.include_router(email_webhooks_router, prefix="/api")
+    app.include_router(support_router, prefix="/api")
+    app.include_router(operations_router, prefix="/api")
+    app.include_router(platform_router, prefix="/api")
     return app
 
 

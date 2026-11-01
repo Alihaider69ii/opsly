@@ -22,12 +22,18 @@ from pathlib import Path
 
 from mutation.catalog import M as PHASE_4
 from mutation.catalog_5 import M as PHASE_5
+from mutation.catalog_6 import M as PHASE_6
+from mutation.catalog_7 import M as PHASE_7
+from mutation.catalog_8 import M as PHASE_8
+from mutation.catalog_9 import M as PHASE_9
+from mutation.catalog_10 import M as PHASE_10
 from mutation.catalog_41 import M as PHASE_4_1
+from mutation.catalog_platform import M as PLATFORM
 from mutation.expected import EXPECTED_SURVIVORS
 
 BACKEND = Path(__file__).resolve().parents[1]
 RESULTS = Path(__file__).with_name("results.json")
-MUTANTS = [*PHASE_4, *PHASE_4_1, *PHASE_5]
+MUTANTS = [*PHASE_4, *PHASE_4_1, *PHASE_5, *PHASE_6, *PHASE_7, *PHASE_8, *PHASE_9, *PHASE_10, *PLATFORM]
 
 
 def tree_hash() -> str:

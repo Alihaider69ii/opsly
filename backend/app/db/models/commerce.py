@@ -10,6 +10,7 @@ Deletions seen in Shopify are recorded with ``deleted_at`` instead of removing t
 history (orders and their items) keeps its references.
 """
 
+import enum
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -19,8 +20,10 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Enum,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     Numeric,
     String,
@@ -31,6 +34,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin
+
+
+class CustomerStatus(enum.StrEnum):
+    ACTIVE = "ACTIVE"
+    ARCHIVED = "ARCHIVED"
+
 
 MONEY = Numeric(18, 4)
 
@@ -97,7 +106,17 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class Customer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """A customer. Email and phone may each be absent (Shopify stores allow both)."""
+    """A customer. Email and phone may each be absent (Shopify stores allow both).
+
+    Phase 9: this is also the unified cross-channel customer/contact identity (see
+    docs/phase-9-progress.md). ``normalized_email``/``normalized_phone`` back deterministic
+    identity matching (Shopify id -> normalized email -> normalized phone; never fuzzy, never by
+    name alone -- see ``app/services/support/identity.py``). Email marketing consent/suppression
+    are deliberately separate columns from Shopify's own ``accepts_marketing``: a customer can
+    unsubscribe from BizFlow-sent email (via an unsubscribe link or a bounce/complaint) without
+    that mutating Shopify's own record, and a later Shopify sync must never silently resurrect a
+    suppressed contact.
+    """
 
     __tablename__ = "customers"
     __table_args__ = (
@@ -107,6 +126,8 @@ class Customer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint(
             "organization_id", "shopify_customer_id", name="uq_customers_org_shopify_customer"
         ),
+        Index("ix_customers_org_normalized_email", "organization_id", "normalized_email"),
+        Index("ix_customers_org_normalized_phone", "organization_id", "normalized_phone"),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -115,9 +136,31 @@ class Customer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     shopify_customer_id: Mapped[int | None] = mapped_column(BigInteger)
     email: Mapped[str | None] = mapped_column(String(320))
     phone: Mapped[str | None] = mapped_column(String(50))
+    # Lowercased/trimmed email and E.164 phone, used only for deterministic identity matching
+    # (never for display). NULL when the source value could not be normalized.
+    normalized_email: Mapped[str | None] = mapped_column(String(320))
+    normalized_phone: Mapped[str | None] = mapped_column(String(20))
     first_name: Mapped[str | None] = mapped_column(String(255))
     last_name: Mapped[str | None] = mapped_column(String(255))
     accepts_marketing: Mapped[bool | None] = mapped_column(Boolean)
+    status: Mapped[CustomerStatus] = mapped_column(
+        Enum(
+            CustomerStatus,
+            native_enum=False,
+            length=20,
+            create_constraint=True,
+            name="customer_status",
+        ),
+        default=CustomerStatus.ACTIVE,
+        server_default="ACTIVE",
+    )
+    # None = never asked / unknown (never treated as opted in). Independent of accepts_marketing.
+    email_marketing_consent: Mapped[bool | None] = mapped_column(Boolean)
+    # A broader kill switch (bounce/complaint/unsubscribe), checked before every marketing send
+    # regardless of email_marketing_consent -- mirrors WhatsAppSuppression's role for WhatsApp.
+    email_suppressed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    email_suppressed_reason: Mapped[str | None] = mapped_column(String(60))
+    email_suppressed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     shopify_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     shopify_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

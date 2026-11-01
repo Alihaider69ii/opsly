@@ -69,11 +69,21 @@ class AgentReply:
         }
 
 
-def prepare_history(messages: Sequence[ChatMessage], limit: int) -> list[ChatMessage]:
+def prepare_history(
+    messages: Sequence[ChatMessage],
+    limit: int,
+    *,
+    max_total_chars: int = HISTORY_TOTAL_CHARS,
+    max_message_chars: int = HISTORY_MESSAGE_CHARS,
+) -> list[ChatMessage]:
     """The recent turns to show the model: oldest first, at most ``limit`` messages and a bounded
     number of characters. Consecutive messages from the same side collapse to the newest (an
     earlier customer message that never got a reply, such as one sent during an outage, is
-    superseded by the retry), and the history never starts with an assistant message."""
+    superseded by the retry), and the history never starts with an assistant message.
+
+    ``max_total_chars``/``max_message_chars`` default to the website chat's budget; a caller with
+    a smaller bound (e.g. WhatsApp, see ``app/services/ai/whatsapp_agent.py``) passes its own.
+    """
     if limit <= 0:
         return []
     collapsed: list[ChatMessage] = []
@@ -91,8 +101,8 @@ def prepare_history(messages: Sequence[ChatMessage], limit: int) -> list[ChatMes
     trimmed: list[ChatMessage] = []
     total = 0
     for message in reversed(recent):  # keep the newest when the character budget runs out
-        text = message.content[:HISTORY_MESSAGE_CHARS]
-        if total + len(text) > HISTORY_TOTAL_CHARS:
+        text = message.content[:max_message_chars]
+        if total + len(text) > max_total_chars:
             break
         trimmed.append(ChatMessage(message.role, text))
         total += len(text)

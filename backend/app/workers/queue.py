@@ -34,6 +34,9 @@ CRAWL_QUEUE_KEY = "bizflow:queue:crawl"
 SHOPIFY_WEBHOOK_SUFFIX = ":shopify-webhook"
 SHOPIFY_SYNC_SUFFIX = ":shopify-sync"
 AUTOMATION_SUFFIX = ":automation"
+WHATSAPP_WEBHOOK_SUFFIX = ":whatsapp-webhook"
+EMAIL_WEBHOOK_SUFFIX = ":email-webhook"
+EMAIL_CAMPAIGN_SUFFIX = ":email-campaign"
 
 
 @dataclass(frozen=True)
@@ -90,7 +93,46 @@ class AutomationExecutionJob:
         return json.dumps({"type": "automation_execution", "execution_id": str(self.execution_id)})
 
 
-Job = CrawlJob | ShopifySyncJob | ShopifyWebhookJob | AutomationEventJob | AutomationExecutionJob
+@dataclass(frozen=True)
+class WhatsAppWebhookJob:
+    """Process one stored WhatsApp webhook ledger event (an inbound message or a status update)."""
+
+    event_id: uuid.UUID
+
+    def to_json(self) -> str:
+        return json.dumps({"type": "whatsapp_webhook", "event_id": str(self.event_id)})
+
+
+@dataclass(frozen=True)
+class EmailWebhookJob:
+    """Process one stored email webhook ledger event (an inbound message or a status update)."""
+
+    event_id: uuid.UUID
+
+    def to_json(self) -> str:
+        return json.dumps({"type": "email_webhook", "event_id": str(self.event_id)})
+
+
+@dataclass(frozen=True)
+class EmailCampaignJob:
+    """Run (or continue) one time-sliced batch of a campaign's send loop."""
+
+    campaign_id: uuid.UUID
+
+    def to_json(self) -> str:
+        return json.dumps({"type": "email_campaign", "campaign_id": str(self.campaign_id)})
+
+
+Job = (
+    CrawlJob
+    | ShopifySyncJob
+    | ShopifyWebhookJob
+    | AutomationEventJob
+    | AutomationExecutionJob
+    | WhatsAppWebhookJob
+    | EmailWebhookJob
+    | EmailCampaignJob
+)
 
 
 def parse_job(raw: str) -> Job | None:
@@ -108,6 +150,12 @@ def parse_job(raw: str) -> Job | None:
             return AutomationEventJob(uuid.UUID(data["event_id"]))
         if kind == "automation_execution":
             return AutomationExecutionJob(uuid.UUID(data["execution_id"]))
+        if kind == "whatsapp_webhook":
+            return WhatsAppWebhookJob(uuid.UUID(data["event_id"]))
+        if kind == "email_webhook":
+            return EmailWebhookJob(uuid.UUID(data["event_id"]))
+        if kind == "email_campaign":
+            return EmailCampaignJob(uuid.UUID(data["campaign_id"]))
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
     return None
@@ -135,9 +183,12 @@ class RedisJobQueue:
         # Highest priority first: BLPOP serves the first non-empty list in this order.
         self._keys = [
             key + SHOPIFY_WEBHOOK_SUFFIX,
+            key + WHATSAPP_WEBHOOK_SUFFIX,
+            key + EMAIL_WEBHOOK_SUFFIX,
             key + AUTOMATION_SUFFIX,
             key,
             key + SHOPIFY_SYNC_SUFFIX,
+            key + EMAIL_CAMPAIGN_SUFFIX,
         ]
         self._client: redis.Redis = redis.Redis.from_url(
             url,
@@ -149,10 +200,16 @@ class RedisJobQueue:
     def _key_for(self, job: Job) -> str:
         if isinstance(job, ShopifyWebhookJob):
             return self._key + SHOPIFY_WEBHOOK_SUFFIX
+        if isinstance(job, WhatsAppWebhookJob):
+            return self._key + WHATSAPP_WEBHOOK_SUFFIX
+        if isinstance(job, EmailWebhookJob):
+            return self._key + EMAIL_WEBHOOK_SUFFIX
         if isinstance(job, (AutomationEventJob, AutomationExecutionJob)):
             return self._key + AUTOMATION_SUFFIX
         if isinstance(job, ShopifySyncJob):
             return self._key + SHOPIFY_SYNC_SUFFIX
+        if isinstance(job, EmailCampaignJob):
+            return self._key + EMAIL_CAMPAIGN_SUFFIX
         return self._key
 
     def enqueue(self, job: Job) -> None:

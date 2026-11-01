@@ -22,9 +22,31 @@ NO_ORG_FK = {
         "an authentic webhook for a shop that is not (or no longer) connected has no organization "
         "yet; the row is kept as an audit record of what was received and is purged on disconnect"
     ),
+    "whatsapp_webhook_events": (
+        "a webhook delivery for a phone_number_id that matches no (or no longer connected) "
+        "connection is still an authentic Meta delivery worth a ledger row for dedupe/audit, "
+        "even though it never resolves to an organization"
+    ),
+    "email_webhook_events": (
+        "an inbound email to an address that matches no (or no longer connected) connection, or a "
+        "status event for a provider_message_id BizFlow cannot yet resolve, is still worth a "
+        "ledger row for dedupe/audit, even though it never resolves to an organization"
+    ),
+    "platform_audit_events": (
+        "some platform-level events (e.g. PLATFORM_ADMIN_LOGIN) are not about any one brand, and "
+        "an event that IS about a brand must still survive that brand being deleted -- the audit "
+        "trail is append-only and outlives the organization it references, so this FK is "
+        "ondelete=SET NULL rather than CASCADE (it does have a real FK; only the cascade shape "
+        "differs from the usual tenant-owned-row convention)"
+    ),
 }
 # Tenant-owned tables where organization_id may be NULL, with the reason.
-NULLABLE_ORG = {"shopify_webhook_events": NO_ORG_FK["shopify_webhook_events"]}
+NULLABLE_ORG = {
+    "shopify_webhook_events": NO_ORG_FK["shopify_webhook_events"],
+    "whatsapp_webhook_events": NO_ORG_FK["whatsapp_webhook_events"],
+    "email_webhook_events": NO_ORG_FK["email_webhook_events"],
+    "platform_audit_events": NO_ORG_FK["platform_audit_events"],
+}
 
 
 def tenant_tables() -> list[Table]:

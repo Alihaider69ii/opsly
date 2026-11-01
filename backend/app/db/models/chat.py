@@ -20,6 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.db.models.support import SenderType  # noqa: F401 (re-exported for schema/API convenience)
 
 PUBLIC_KEY_PREFIX = "pk_"
 
@@ -73,6 +74,12 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         # Target of messages' composite foreign key, which ties messages to the same organization.
         UniqueConstraint("id", "organization_id", name="uq_conversations_id_organization_id"),
+        ForeignKeyConstraint(
+            ["customer_id", "organization_id"],
+            ["customers.id", "customers.organization_id"],
+            ondelete="SET NULL",
+            name="fk_conversations_customer_org",
+        ),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -91,8 +98,10 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Random anonymous id minted by the widget; groups a returning visitor's conversations. It is
     # NOT a credential: access to a conversation is proven by its token (below).
     visitor_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    # Placeholder for the CRM phase (no customers table yet, so no foreign key).
-    customer_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # Phase 9: resolved (read-only, best-effort) once a lead/email/phone identifies a known
+    # Customer -- see app/services/support/identity.py. NULL until then; a visitor is never
+    # required to identify themselves.
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, index=True)
     status: Mapped[ConversationStatus] = mapped_column(
         Enum(
             ConversationStatus, native_enum=False, length=20, create_constraint=True, name="status"
@@ -133,3 +142,11 @@ class Message(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     # Audit data for assistant turns (grounded?, source pages, model, latency). Never returned to
     # the public API.
     meta: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # Phase 9: explicit attribution. NULL for rows written before this column existed (none are
+    # expected to persist across sessions -- see docs/phase-9-progress.md); every new row sets it.
+    sender_type: Mapped[SenderType | None] = mapped_column(
+        Enum(SenderType, native_enum=False, length=20, create_constraint=True, name="sender_type")
+    )
+    sender_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )

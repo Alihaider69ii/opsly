@@ -12,6 +12,7 @@ from pydantic import (
     field_validator,
 )
 
+from app.db.models.organization import OrganizationEnvironment
 from app.db.models.organization_member import OrganizationRole
 
 SLUG_PATTERN = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
@@ -57,6 +58,8 @@ class OrganizationOut(BaseModel):
     slug: str
     website: str | None
     business_type: str | None
+    environment: OrganizationEnvironment
+    is_active: bool
     created_at: datetime
 
 

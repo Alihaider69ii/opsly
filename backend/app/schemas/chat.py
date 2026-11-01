@@ -75,7 +75,13 @@ class MessageOut(BaseModel):
 
 class ChatReply(BaseModel):
     conversation_id: uuid.UUID
-    message: MessageOut
+    # Phase 9: "human_handling" means a human has taken over this conversation (see
+    # app/services/support/conversations.py) -- the customer's message was stored, but no reply
+    # was generated (the AI never auto-replies while a human is active). ``message`` is then
+    # None; the widget should poll GET /conversations/{id} for the human's reply instead of
+    # treating the absence of a message as an error.
+    status: Literal["ai_replied", "human_handling"] = "ai_replied"
+    message: MessageOut | None = None
 
 
 class ConversationOut(BaseModel):

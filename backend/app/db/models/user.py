@@ -17,6 +17,10 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     full_name: Mapped[str | None] = mapped_column(String(200))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # Platform-level authority, orthogonal to any organization membership/role (brief section 0,
+    # "do NOT overload OWNER to mean platform admin"). A platform admin typically has zero
+    # OrganizationMember rows of their own.
+    is_platform_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     memberships: Mapped[list["OrganizationMember"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

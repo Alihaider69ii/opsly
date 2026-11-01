@@ -47,12 +47,24 @@ from app.db.models import (
     SyncResource,
     SyncStatus,
     WebhookEventStatus,
+    WhatsAppConnection,
+    WhatsAppConsentCategory,
+    WhatsAppConsentStatus,
+    WhatsAppMessage,
+    WhatsAppWebhookEvent,
     WorkflowStatus,
 )
 from app.services import automation
 from app.services.integrations.shopify import sync, webhooks
 from app.services.integrations.shopify.factory import ShopifyRuntime
 from app.services.integrations.shopify.validation import sign_webhook_body
+from app.services.messaging.whatsapp import consent as wa_consent
+from app.services.messaging.whatsapp import webhooks as wa_webhooks
+from app.services.messaging.whatsapp import window as wa_window
+from app.services.messaging.whatsapp.contacts import (
+    get_or_create_contact as wa_get_or_create_contact,
+)
+from app.services.messaging.whatsapp.validation import sign_meta_body
 from app.workers.queue import (
     AutomationExecutionJob,
     RedisJobQueue,
@@ -70,11 +82,13 @@ from tests.integration.process_harness import (
 from tests.shopify.conftest import seed_connection
 from tests.shopify.fake_shopify import FakeShopify, make_product, make_variant
 from tests.shopify.http_server import FakeShopifyHttpServer, operation_is
+from tests.whatsapp.conftest import seed_connection as seed_whatsapp_connection
 
 pytestmark = pytest.mark.integration
 
 KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
 SECRET = "test-client-secret"
+WHATSAPP_APP_SECRET = "test-whatsapp-app-secret"
 PRODUCTS, CUSTOMERS, ORDERS = 60, 30, 30  # 3 pages of products, 1 of customers, 2 of orders
 
 
@@ -105,6 +119,11 @@ class Stack:
                 "secret_encryption_key": SecretStr(KEY),
                 "shopify_client_secret": SecretStr(SECRET),
                 "shopify_client_id": "test-client-id",
+                # WhatsApp shares this same deployment's secret-storage key; only the failure-
+                # injection tests below exercise it, but every Stack gets a usable configuration.
+                "whatsapp_messaging_provider": "fake",
+                "whatsapp_app_secret": SecretStr(WHATSAPP_APP_SECRET),
+                "whatsapp_webhook_verify_token": SecretStr("test-verify-token"),
             }
         )
         self.settings = settings
@@ -133,6 +152,8 @@ class Stack:
             "SHOPIFY_DEV_BASE_URL": self.server.base_url,
             "SHOPIFY_SYNC_MIN_INTERVAL_SECONDS": "0",
             "SHOPIFY_MAX_RETRIES": "2",
+            "WHATSAPP_MESSAGING_PROVIDER": "fake",
+            "WHATSAPP_APP_SECRET": WHATSAPP_APP_SECRET,
             "WORKER_HEARTBEAT_FILE": str(self.tmp / f"hb-{uuid.uuid4().hex[:6]}"),
         }
         return base_worker_env(**{**settings, **overrides})
@@ -791,3 +812,412 @@ def test_sigterm_lets_the_worker_finish_the_current_job_and_exit_cleanly(stack):
     assert worker.wait_exit(60) == 0
     assert "worker stopped" in worker.logs()
     assert stack.states()[SyncResource.PRODUCTS].status != SyncStatus.FAILED
+
+
+# --- WhatsApp: real worker / Postgres / Redis failure injection (Phase 7) -------------------------
+#
+# Reuses the same ``Stack`` (its real worker-process management, real Postgres/Redis, the shared
+# org) rather than building a parallel WhatsApp-specific harness -- exactly how the generic
+# automation-action tests above already reuse it without needing Shopify-specific state. These
+# complement the Phase 6 unit-level simulated crash test
+# (tests/whatsapp/test_automation_integration.py::test_worker_crash_during_a_whatsapp_send_fails_the_execution_rather_than_retrying)
+# with a REAL hard-killed OS process / REAL severed Postgres connection / a REAL (if unreachable)
+# Redis client, per this project's "verify with real infrastructure, not just fakes" standard.
+
+
+def _seed_whatsapp(stack) -> tuple[uuid.UUID, uuid.UUID]:
+    """A CONNECTED connection, a contact OPTED_IN to SUPPORT, and an open customer-service
+    window -- the minimum a ``send_whatsapp_text`` action needs to pass every policy gate."""
+    secrets = SecretManager.from_settings(stack.settings)
+    connection_id = seed_whatsapp_connection(
+        stack.pg, stack.org_id, secrets, phone_number_id=f"PNID_{uuid.uuid4().hex[:10]}"
+    )
+    now = datetime.now(UTC)
+    with stack.pg() as db:
+        contact = wa_get_or_create_contact(
+            db, organization_id=stack.org_id, phone_e164="+14155550100"
+        )
+        db.commit()
+        contact_id = contact.id
+        wa_consent.record_consent(
+            db,
+            organization_id=stack.org_id,
+            contact_id=contact_id,
+            category=WhatsAppConsentCategory.SUPPORT,
+            status=WhatsAppConsentStatus.OPTED_IN,
+            source="test",
+            now=now,
+        )
+        db.commit()
+        conversation = wa_window.get_or_create_conversation(
+            db, organization_id=stack.org_id, contact_id=contact_id, connection_id=connection_id
+        )
+        wa_window.record_inbound(conversation, now=now, window_hours=24)
+        db.commit()
+    return connection_id, contact_id
+
+
+def _whatsapp_automation_execution(stack, contact_id: uuid.UUID, action: dict) -> uuid.UUID:
+    execution_id = uuid.uuid4()
+    with stack.pg() as db:
+        workflow = AutomationWorkflow(
+            organization_id=stack.org_id,
+            name=f"WA recovery {execution_id}",
+            status=WorkflowStatus.ACTIVE,
+            version=1,
+            definition={
+                "trigger": {"event": "whatsapp_message_received"},
+                "conditions": [],
+                "actions": [action],
+            },
+        )
+        event = AutomationEvent(
+            organization_id=stack.org_id,
+            event_type="whatsapp_message_received",
+            source="whatsapp",
+            source_id=str(execution_id),
+            dedupe_key=f"wa-recovery:{execution_id}",
+            occurred_at=datetime.now(UTC),
+            payload={"whatsapp": {"contact_id": str(contact_id)}},
+            depth=0,
+            status=EventStatus.PROCESSED,
+            attempts=1,
+            created_at=datetime.now(UTC),
+        )
+        db.add_all([workflow, event])
+        db.flush()
+        execution = AutomationExecution(
+            id=execution_id,
+            organization_id=stack.org_id,
+            workflow_id=workflow.id,
+            event_id=event.id,
+            workflow_version=workflow.version,
+            workflow_snapshot={"name": workflow.name, "definition": workflow.definition},
+            event_snapshot={"whatsapp": {"contact_id": str(contact_id)}},
+            status=ExecutionStatus.QUEUED,
+            current_step=0,
+            attempts=0,
+            max_attempts=5,
+            created_at=datetime.now(UTC),
+        )
+        db.add(execution)
+        db.commit()
+    stack.queue.enqueue(AutomationExecutionJob(execution_id))
+    return execution_id
+
+
+def _hold_whatsapp_message_insert(stack) -> None:
+    with stack.pg() as db:
+        db.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION test_pause_whatsapp_message() RETURNS trigger "
+                "LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(120); RETURN NEW; END $$"
+            )
+        )
+        db.execute(text("DROP TRIGGER IF EXISTS test_pause_whatsapp_message ON whatsapp_messages"))
+        db.execute(
+            text(
+                "CREATE TRIGGER test_pause_whatsapp_message BEFORE INSERT ON whatsapp_messages "
+                "FOR EACH ROW EXECUTE FUNCTION test_pause_whatsapp_message()"
+            )
+        )
+        db.commit()
+
+
+def _remove_whatsapp_message_insert_hold(stack) -> None:
+    with stack.pg() as db:
+        # A hard-killed or network-severed client cannot send PostgreSQL a cancel while its
+        # backend is in pg_sleep; cancel that test-only query directly so dropping the trigger
+        # does not wait for the full 120s.
+        db.execute(
+            text(
+                "SELECT pg_cancel_backend(pid) FROM pg_stat_activity "
+                "WHERE datname=current_database() AND wait_event='PgSleep' "
+                "AND query ILIKE '%INSERT INTO whatsapp_messages%'"
+            )
+        )
+        db.execute(text("DROP TRIGGER IF EXISTS test_pause_whatsapp_message ON whatsapp_messages"))
+        db.execute(text("DROP FUNCTION IF EXISTS test_pause_whatsapp_message()"))
+        db.commit()
+
+
+def _whatsapp_insert_is_waiting(stack) -> bool:
+    with stack.pg() as db:
+        return bool(
+            db.scalar(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() "
+                    "AND wait_event='PgSleep' AND query ILIKE '%INSERT INTO whatsapp_messages%')"
+                )
+            )
+        )
+
+
+def _age_execution_heartbeat(stack, execution_id: uuid.UUID) -> None:
+    """Pretend the killed worker stopped heart-beating an hour ago (mirrors
+    ``Stack.age_running_stages`` for Shopify) so ``recover_due``'s staleness check fires
+    immediately instead of waiting out its real 120s default."""
+    with stack.pg() as db:
+        db.execute(
+            text(
+                "UPDATE automation_executions SET heartbeat_at = now() - interval '1 hour' "
+                "WHERE id = :id"
+            ),
+            {"id": str(execution_id)},
+        )
+        db.commit()
+
+
+def _execution_status(stack, execution_id: uuid.UUID) -> ExecutionStatus:
+    with stack.pg() as db:
+        return db.get(AutomationExecution, execution_id).status
+
+
+def _execution_error_code(stack, execution_id: uuid.UUID) -> str | None:
+    with stack.pg() as db:
+        return db.get(AutomationExecution, execution_id).error_code
+
+
+def _whatsapp_message_count(stack) -> int:
+    with stack.pg() as db:
+        return int(
+            db.scalar(
+                select(func.count())
+                .select_from(WhatsAppMessage)
+                .where(WhatsAppMessage.organization_id == stack.org_id)
+            )
+        )
+
+
+def test_killed_before_a_whatsapp_send_ever_reaches_the_provider_fails_the_execution_not_a_retry(
+    stack,
+):
+    """Worker killed while a ``send_whatsapp_text`` step is RUNNING, before the message row (and
+    therefore before any provider call) ever committed. This is an EXTERNAL_CALL_ACTION_TYPE, so
+    crash recovery must fail the execution outright rather than silently retry a call that may (or
+    may not) have already reached a real recipient -- see automation.py's ``recover_due`` and
+    module docstring."""
+    _, contact_id = _seed_whatsapp(stack)
+    execution_id = _whatsapp_automation_execution(
+        stack,
+        contact_id,
+        {"type": "send_whatsapp_text", "content": "Hello", "consent_category": "SUPPORT"},
+    )
+    _hold_whatsapp_message_insert(stack)
+    first = stack.worker("whatsapp-killed")
+    try:
+        eventually(
+            lambda: _whatsapp_insert_is_waiting(stack),
+            what="the worker to enter the whatsapp_messages insert",
+        )
+        first.kill()
+        assert _execution_status(stack, execution_id) == ExecutionStatus.RUNNING
+        assert _whatsapp_message_count(stack) == 0  # no row ever committed -- no send happened
+    finally:
+        _remove_whatsapp_message_insert_hold(stack)
+
+    _age_execution_heartbeat(stack, execution_id)
+    second = stack.worker("whatsapp-recovery")
+    eventually(
+        lambda: _execution_status(stack, execution_id) == ExecutionStatus.FAILED,
+        what="crash recovery to fail the execution rather than silently retry an external call",
+    )
+    assert _execution_error_code(stack, execution_id) == "worker_lost_during_whatsapp_send"
+    assert _whatsapp_message_count(stack) == 0  # still never sent: fail-closed, not retried
+    assert second.alive
+
+
+def test_postgres_outage_during_a_whatsapp_send_recovers_without_a_duplicate_send(stack):
+    """The worker is never killed here -- its connection to PostgreSQL is severed (a real network
+    partition, not a mock) while it is inside the same whatsapp_messages insert held above. Unlike
+    a hard process kill, the transaction that was building the message row never committed (the
+    insert itself is what failed), so nothing was ever created or sent; the still-alive worker's
+    normal retry of the same execution/step (same idempotency key: ``automation:<execution
+    id>:<step index>``) finds no existing row and completes the send cleanly once PostgreSQL
+    returns -- exactly once, never a duplicate delivery."""
+    _, contact_id = _seed_whatsapp(stack)
+    execution_id = _whatsapp_automation_execution(
+        stack,
+        contact_id,
+        {
+            "type": "send_whatsapp_text",
+            "content": "Hello after outage",
+            "consent_category": "SUPPORT",
+        },
+    )
+    _hold_whatsapp_message_insert(stack)
+    proxy = stack.proxy("localhost", 5432)
+    database_url = TEST_DATABASE_URL.replace("localhost:5432", f"127.0.0.1:{proxy.port}")
+    worker = stack.worker("whatsapp-db-outage", DATABASE_URL=database_url)
+    try:
+        eventually(
+            lambda: _whatsapp_insert_is_waiting(stack),
+            what="the worker to enter the whatsapp_messages insert",
+        )
+        proxy.cut()
+        eventually(
+            lambda: "job crashed" in worker.logs(),
+            what="the database failure to be contained by the worker",
+        )
+        assert worker.alive
+        proxy.restore()
+    finally:
+        _remove_whatsapp_message_insert_hold(stack)
+
+    # A safety net in case the surviving worker's own retry is slower than the staleness window:
+    # recover_due would also pick this up once the heartbeat goes stale, via a second worker.
+    _age_execution_heartbeat(stack, execution_id)
+    recovery = stack.worker("whatsapp-db-recovery")
+    eventually(
+        lambda: _execution_status(stack, execution_id) == ExecutionStatus.COMPLETED,
+        what="the execution to complete once PostgreSQL is reachable again",
+    )
+    assert _whatsapp_message_count(stack) == 1  # sent exactly once, never duplicated
+    assert worker.alive and recovery.alive
+
+
+def _wa_inbound_payload(phone_number_id: str, wamid: str, wa_id: str, text_body: str) -> bytes:
+    return json.dumps(
+        {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "id": "waba-test",
+                    "changes": [
+                        {
+                            "value": {
+                                "messaging_product": "whatsapp",
+                                "metadata": {"phone_number_id": phone_number_id},
+                                "contacts": [{"profile": {"name": "Test"}, "wa_id": wa_id}],
+                                "messages": [
+                                    {
+                                        "from": wa_id,
+                                        "id": wamid,
+                                        "timestamp": str(int(datetime.now(UTC).timestamp())),
+                                        "type": "text",
+                                        "text": {"body": text_body},
+                                    }
+                                ],
+                            },
+                            "field": "messages",
+                        }
+                    ],
+                }
+            ],
+        }
+    ).encode()
+
+
+def test_a_duplicate_webhook_processed_by_a_real_worker_never_runs_the_automation_twice(stack):
+    """The intake-level dedupe (unit-tested already) plus a REAL worker process consuming the
+    resulting job(s): two identical deliveries must still produce exactly one ledger row, one
+    inbound message, and one automation side effect -- not two."""
+    connection_id, _ = _seed_whatsapp(stack)
+    with stack.pg() as db:
+        phone_number_id = db.get(WhatsAppConnection, connection_id).phone_number_id
+
+    workflow_name = f"WA dup {uuid.uuid4().hex[:8]}"
+    with stack.pg() as db:
+        db.add(
+            AutomationWorkflow(
+                organization_id=stack.org_id,
+                name=workflow_name,
+                status=WorkflowStatus.ACTIVE,
+                version=1,
+                definition={
+                    # The seeded contact has never messaged before, so its first inbound message
+                    # is "whatsapp_conversation_started", not "whatsapp_message_received".
+                    "trigger": {"event": "whatsapp_conversation_started"},
+                    "conditions": [],
+                    "actions": [{"type": "create_task", "title": "React to inbound WhatsApp"}],
+                },
+            )
+        )
+        db.commit()
+
+    worker = stack.worker("whatsapp-dup-webhook")
+    wamid = f"wamid.dup.{uuid.uuid4().hex[:10]}"
+    body = _wa_inbound_payload(phone_number_id, wamid, "14155550199", "Duplicate delivery test")
+    headers = {"x-hub-signature-256": sign_meta_body(body, WHATSAPP_APP_SECRET)}
+
+    with stack.pg() as db:
+        for _ in range(2):
+            wa_webhooks.receive_webhook(
+                db, body=body, headers=headers, settings=stack.settings, queue=stack.queue
+            )
+
+    def _state():
+        with stack.pg() as db:
+            ledger = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(WhatsAppWebhookEvent)
+                    .where(WhatsAppWebhookEvent.resource_wamid == wamid)
+                )
+            )
+            messages = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(WhatsAppMessage)
+                    .where(WhatsAppMessage.provider_message_id == wamid)
+                )
+            )
+            tasks = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(AutomationTask)
+                    .join(
+                        AutomationExecution, AutomationExecution.id == AutomationTask.execution_id
+                    )
+                    .join(
+                        AutomationWorkflow, AutomationWorkflow.id == AutomationExecution.workflow_id
+                    )
+                    .where(AutomationWorkflow.name == workflow_name)
+                )
+            )
+            return ledger, messages, tasks
+
+    eventually(
+        lambda: _state() == (1, 1, 1),
+        what="exactly one ledger row, inbound message and automation task despite two deliveries",
+    )
+    assert _state() == (1, 1, 1)
+    assert worker.alive
+
+
+def test_redis_unavailable_during_webhook_intake_rejects_cleanly_with_no_orphaned_ledger_row(
+    stack,
+):
+    """A REAL (if deliberately unreachable) Redis client, not a mock: proves the actual
+    ``redis.RedisError`` the real client raises is what ``_ledger``'s broad except clause catches,
+    and that intake fails closed -- deletes its own just-written ledger row and tells the caller
+    503 -- rather than leaving a half-written row Meta will never know to retry correctly."""
+    connection_id, _ = _seed_whatsapp(stack)
+    with stack.pg() as db:
+        phone_number_id = db.get(WhatsAppConnection, connection_id).phone_number_id
+
+    wamid = f"wamid.redisdown.{uuid.uuid4().hex[:10]}"
+    body = _wa_inbound_payload(
+        phone_number_id, wamid, "14155550188", "Should be rejected, not half-stored"
+    )
+    headers = {"x-hub-signature-256": sign_meta_body(body, WHATSAPP_APP_SECRET)}
+
+    dead_queue = RedisJobQueue("redis://127.0.0.1:1/0", key="x", socket_timeout=0.2)
+    try:
+        with stack.pg() as db, pytest.raises(wa_webhooks.WebhookRejected) as exc:
+            wa_webhooks.receive_webhook(
+                db, body=body, headers=headers, settings=stack.settings, queue=dead_queue
+            )
+        assert exc.value.status_code == 503
+    finally:
+        dead_queue.close()
+
+    with stack.pg() as db:
+        orphaned = int(
+            db.scalar(
+                select(func.count())
+                .select_from(WhatsAppWebhookEvent)
+                .where(WhatsAppWebhookEvent.resource_wamid == wamid)
+            )
+        )
+    assert orphaned == 0

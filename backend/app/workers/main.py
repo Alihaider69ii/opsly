@@ -29,6 +29,8 @@ from app.services import automation
 from app.services.ai.factory import build_embedding_provider
 from app.services.crawler.crawler import CrawlLimits
 from app.services.crawler.factory import build_fetcher, build_limits
+from app.services.email import send as email_send
+from app.services.email import webhooks as email_webhooks
 from app.services.integrations.shopify import lifecycle, sync, webhooks
 from app.services.integrations.shopify.factory import ShopifyRuntime, check_api_version
 from app.services.integrations.shopify.subscriptions import SubscriptionAuditor
@@ -37,15 +39,20 @@ from app.services.knowledge.crawl_runner import (
     requeue_orphaned_pending,
     run_crawl,
 )
+from app.services.messaging.whatsapp import send as whatsapp_send
+from app.services.messaging.whatsapp import webhooks as whatsapp_webhooks
 from app.workers.heartbeat import WorkerHeartbeat
 from app.workers.queue import (
     AutomationEventJob,
     AutomationExecutionJob,
     CrawlJob,
+    EmailCampaignJob,
+    EmailWebhookJob,
     Job,
     RedisJobQueue,
     ShopifySyncJob,
     ShopifyWebhookJob,
+    WhatsAppWebhookJob,
 )
 
 logger = logging.getLogger("bizflow.worker")
@@ -97,6 +104,37 @@ def run_job(
     if isinstance(job, AutomationExecutionJob):
         with SessionLocal() as db:
             return automation.run_execution(db, job.execution_id, queue)
+    if isinstance(job, WhatsAppWebhookJob):
+        # Unlike Shopify jobs, an inbound message or status update needs no secret at all; only
+        # an optional AI auto-reply decrypts a token, and does so defensively (see
+        # ``_process_message``), so this runs even when the secret manager is unusable.
+        outcome = whatsapp_webhooks.process_event(
+            SessionLocal, job.event_id, settings, runtime.secrets if runtime is not None else None
+        )
+        logger.info("whatsapp webhook job finished event=%s outcome=%s", job.event_id, outcome)
+        return outcome
+    if isinstance(job, EmailWebhookJob):
+        outcome = email_webhooks.process_event(SessionLocal, job.event_id, settings)
+        logger.info("email webhook job finished event=%s outcome=%s", job.event_id, outcome)
+        return outcome
+    if isinstance(job, EmailCampaignJob):
+        from app.services.email import campaigns as email_campaigns
+        from app.services.email.errors import EmailError
+        from app.services.email.factory import get_email_provider
+
+        with SessionLocal() as db:
+            try:
+                provider = get_email_provider()
+            except EmailError:
+                logger.warning("email campaign job dropped: no usable email provider")
+                return "dropped"
+            outcome = email_campaigns.run_campaign_batch(
+                db, queue, campaign_id=job.campaign_id, settings=settings, provider=provider
+            )
+        logger.info(
+            "email campaign batch finished campaign=%s outcome=%s", job.campaign_id, outcome
+        )
+        return outcome
     if runtime is None:
         logger.error("shopify job dropped: SECRET_ENCRYPTION_KEY is not usable")
         return "dropped"
@@ -126,6 +164,12 @@ def job_label(job: Job) -> str:
         return f"automation-event:{job.event_id}"
     if isinstance(job, AutomationExecutionJob):
         return f"automation-execution:{job.execution_id}"
+    if isinstance(job, WhatsAppWebhookJob):
+        return f"whatsapp-webhook:{job.event_id}"
+    if isinstance(job, EmailWebhookJob):
+        return f"email-webhook:{job.event_id}"
+    if isinstance(job, EmailCampaignJob):
+        return f"email-campaign:{job.campaign_id}"
     return "job"  # pragma: no cover
 
 
@@ -229,6 +273,20 @@ def maintain(
         lambda: _recover_automation(queue),
         lambda: webhooks.prune_old_events(SessionLocal, settings.shopify_webhook_retention_days),
         lambda: lifecycle.finish_pending_purges(SessionLocal),
+        lambda: whatsapp_webhooks.requeue_pending_events(
+            SessionLocal, queue, ORPHANED_EVENT_AFTER_SECONDS
+        ),
+        lambda: whatsapp_webhooks.prune_old_events(
+            SessionLocal, settings.whatsapp_webhook_retention_days
+        ),
+        lambda: _cancel_orphaned_whatsapp_sending(),
+        lambda: email_webhooks.requeue_pending_events(
+            SessionLocal, queue, ORPHANED_EVENT_AFTER_SECONDS
+        ),
+        lambda: email_webhooks.prune_old_events(
+            SessionLocal, settings.email_webhook_retention_days
+        ),
+        lambda: _cancel_orphaned_email_sending(),
     ]
     if runtime is not None:
         steps.append(lambda: lifecycle.rotate_aging_tokens(runtime, SessionLocal))
@@ -246,6 +304,17 @@ def _recover_automation(queue: RedisJobQueue) -> int:
         events = automation.requeue_pending_events(db, queue)
         executions = automation.recover_due(db, queue)
         return events + executions
+
+
+def _cancel_orphaned_whatsapp_sending() -> int:
+    """Dashboard hygiene only; never retries or calls a provider (see ``send.py`` docstring)."""
+    with SessionLocal() as db:
+        return whatsapp_send.cancel_orphaned_sending(db)
+
+
+def _cancel_orphaned_email_sending() -> int:
+    with SessionLocal() as db:
+        return email_send.cancel_orphaned_sending(db)
 
 
 if __name__ == "__main__":

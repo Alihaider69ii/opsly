@@ -29,7 +29,7 @@ const args = process.argv.slice(2);
 const flags = new Set(args.filter((a) => a.startsWith("--")));
 const requested = args.filter((a) => !a.startsWith("--"));
 
-const OFFLINE = ["auth", "security", "layout", "shopify", "automations"];
+const OFFLINE = ["auth", "security", "layout", "shopify", "automations", "whatsapp", "support", "operations", "platform-admin"];
 const INTERNET = ["knowledge", "chat"]; // crawl example.com / quotes.toscrape.com
 const suites = requested.length ? requested : flags.has("--with-internet") ? [...OFFLINE, ...INTERNET] : OFFLINE;
 
@@ -143,6 +143,8 @@ async function main() {
   const redisContainer = composeContainer("redis");
   process.env.E2E_DB_CONTAINER = dbContainer;
   process.env.E2E_DB_NAME = DB_NAME;
+  process.env.E2E_REDIS_CONTAINER = redisContainer;
+  process.env.E2E_REDIS_DB = String(REDIS_DB);
   process.env.E2E_ARTIFACTS = ARTIFACTS;
   log(`artifacts: ${ARTIFACTS}`);
 
@@ -151,6 +153,9 @@ async function main() {
   const databaseUrl = `postgresql+psycopg://bizflow:bizflow@127.0.0.1:5432/${DB_NAME}`;
 
   const shopifyClientSecret = process.env.E2E_SHOPIFY_CLIENT_SECRET || "e2e-client-secret";
+  const whatsappAppSecret = process.env.E2E_WHATSAPP_APP_SECRET || "e2e-whatsapp-app-secret";
+  const whatsappVerifyToken = process.env.E2E_WHATSAPP_VERIFY_TOKEN || "e2e-whatsapp-verify-token";
+  const emailWebhookSecret = process.env.E2E_EMAIL_WEBHOOK_SECRET || "whsec_ZTJlLWVtYWlsLXdlYmhvb2stc2VjcmV0";
   const backendEnv = {
     ENVIRONMENT: "development",
     DATABASE_URL: databaseUrl,
@@ -174,6 +179,22 @@ async function main() {
     SHOPIFY_WEBHOOK_BASE_URL: `http://localhost:${PORTS.api}`,
     SHOPIFY_SYNC_MIN_INTERVAL_SECONDS: "3",
     WORKER_HEARTBEAT_FILE: path.join(ARTIFACTS, "worker-heartbeat"),
+    // WhatsApp runs entirely against the offline "fake" provider (no Meta credentials exist in
+    // any environment this repo runs in): connect/status/templates/webhooks/automation are all
+    // exercised deterministically, never a real Meta call.
+    WHATSAPP_MESSAGING_PROVIDER: "fake",
+    WHATSAPP_APP_ID: "e2e-whatsapp-app-id",
+    WHATSAPP_APP_SECRET: whatsappAppSecret,
+    WHATSAPP_WEBHOOK_VERIFY_TOKEN: whatsappVerifyToken,
+    WHATSAPP_CONNECT_RATE_LIMIT: "500", // this suite connects/reconnects across several tenants
+    WHATSAPP_SEND_RATE_LIMIT: "500", // the automation suite below sends several messages per run
+    // Email runs entirely against the offline "fake" provider (no Resend credentials exist in any
+    // environment this repo runs in): connect/templates/campaigns/webhooks/unsubscribe/automation
+    // are all exercised deterministically, never a real Resend call.
+    EMAIL_PROVIDER: "fake",
+    EMAIL_WEBHOOK_SECRET: emailWebhookSecret,
+    EMAIL_UNSUBSCRIBE_BASE_URL: `http://localhost:${PORTS.api}`,
+    EMAIL_SEND_RATE_LIMIT: "500", // the campaign suite below sends several emails per run
     PYTHONUNBUFFERED: "1",
     PYTHONIOENCODING: "utf-8",
   };
@@ -200,7 +221,7 @@ async function main() {
   await waitFor(`http://localhost:${PORTS.api}/health/worker`, "worker", 90000, (r) => r.status === 200);
   await waitFor(`http://localhost:${PORTS.frontend}/login`, "dashboard", 240000, (r) => r.status === 200);
   log("stack is ready; warming the dashboard's pages");
-  for (const route of ["/signup", "/onboarding", "/dashboard", "/knowledge", "/website-chat", "/integrations/shopify"]) {
+  for (const route of ["/signup", "/onboarding", "/dashboard", "/knowledge", "/website-chat", "/integrations/shopify", "/whatsapp", "/support", "/email"]) {
     await fetch(`http://localhost:${PORTS.frontend}${route}`, { redirect: "manual", signal: AbortSignal.timeout(120000) }).catch(() => {});
   }
 
@@ -217,6 +238,9 @@ async function main() {
         E2E_API: `http://localhost:${PORTS.api}`,
         E2E_FAKE: `http://127.0.0.1:${PORTS.fake}`,
         E2E_SHOPIFY_CLIENT_SECRET: shopifyClientSecret,
+        E2E_WHATSAPP_APP_SECRET: whatsappAppSecret,
+        E2E_WHATSAPP_VERIFY_TOKEN: whatsappVerifyToken,
+        E2E_EMAIL_WEBHOOK_SECRET: emailWebhookSecret,
       },
     });
     results.push({ name, code: result.status, seconds: Math.round((Date.now() - started) / 1000) });

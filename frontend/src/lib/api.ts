@@ -20,16 +20,21 @@ type Options = {
   token?: string;
   body?: unknown;
   forwardedFor?: string;
+  // Platform admin "view as brand" (docs/platform-admin.md). Only ever has an effect when the
+  // bearer token belongs to a user with is_platform_admin=True -- the backend ignores it
+  // otherwise, so this can never widen a normal user's access.
+  viewOrgId?: string;
 };
 
 export async function apiFetch<T>(
   path: string,
-  { method = "GET", token, body, forwardedFor }: Options = {},
+  { method = "GET", token, body, forwardedFor, viewOrgId }: Options = {},
 ): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (token) headers.Authorization = `Bearer ${token}`;
   if (forwardedFor) headers["X-Forwarded-For"] = forwardedFor;
+  if (viewOrgId) headers["X-Platform-View-Organization-Id"] = viewOrgId;
 
   let res: Response;
   try {

@@ -61,7 +61,8 @@ def test_asking_a_question_returns_a_grounded_answer_and_stores_both_messages(
     assert body["conversation_id"] == conversation_id
     assert body["message"]["role"] == "assistant"
     assert body["message"]["content"] == "Brand A ships within two business days."
-    assert set(body) == {"conversation_id", "message"}  # nothing about retrieval or sources
+    assert body["status"] == "ai_replied"
+    assert set(body) == {"conversation_id", "message", "status"}  # nothing about retrieval/sources
 
     rows = messages_in_db(db)
     assert [(m.position, m.role, m.content) for m in rows] == [

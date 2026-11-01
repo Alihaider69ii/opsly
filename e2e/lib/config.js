@@ -20,6 +20,11 @@ const config = {
   DB_CONTAINER: env.E2E_DB_CONTAINER || "product-db-1",
   DB_NAME: env.E2E_DB_NAME || "bizflow_e2e",
   DB_USER: env.E2E_DB_USER || "bizflow",
+  // redis-cli access to seed the fake email provider's shared inbound-content registry (see
+  // app/services/email/providers/fake.py) -- the API and worker are separate processes, so this
+  // is the only way an E2E test (a third, separate process) can make fetch_inbound() see content.
+  REDIS_CONTAINER: env.E2E_REDIS_CONTAINER || "product-redis-1",
+  REDIS_DB: Number(env.E2E_REDIS_DB || 14),
 };
 
 fs.mkdirSync(config.ARTIFACTS, { recursive: true });
@@ -42,6 +47,15 @@ config.sql = function sql(query) {
     ],
     { encoding: "utf8" },
   ).trim();
+};
+
+/** Seed a key in the E2E Redis database via redis-cli (see REDIS_CONTAINER/REDIS_DB above). */
+config.redisSet = function redisSet(key, value, exSeconds) {
+  execFileSync(
+    "docker",
+    ["exec", config.REDIS_CONTAINER, "redis-cli", "-n", String(config.REDIS_DB), "SET", key, value, "EX", String(exSeconds)],
+    { encoding: "utf8" },
+  );
 };
 
 /**

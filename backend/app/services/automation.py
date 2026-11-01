@@ -10,6 +10,8 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
+from app.core.secrets import SecretError, SecretManager
 from app.db.models import (
     AutomationEvent,
     AutomationExecution,
@@ -17,15 +19,40 @@ from app.db.models import (
     AutomationTask,
     AutomationWorkflow,
     Customer,
+    DetectedBy,
+    EmailClassification,
+    EmailConnection,
+    EmailMessageStatus,
+    EmailTemplate,
+    EmailTemplateStatus,
     EventStatus,
     ExecutionStatus,
+    IssueCategory,
+    Order,
+    SenderType,
     StepStatus,
     WebsiteLead,
+    WhatsAppConnection,
+    WhatsAppConnectionStatus,
+    WhatsAppConsentCategory,
+    WhatsAppContact,
+    WhatsAppMessageStatus,
     WorkflowStatus,
 )
 from app.services.ai.errors import AIError
 from app.services.ai.factory import get_llm_provider
 from app.services.ai.provider import AIRequest, ChatMessage
+from app.services.email import send as email_send
+from app.services.email import templates as email_templates
+from app.services.email import threading as email_threading
+from app.services.email.errors import EmailError
+from app.services.email.factory import get_email_provider
+from app.services.messaging.errors import MessagingError
+from app.services.messaging.factory import get_messaging_provider
+from app.services.messaging.phone import InvalidPhoneNumber, normalize_phone
+from app.services.messaging.whatsapp import send as whatsapp_send
+from app.services.messaging.whatsapp.contacts import get_or_create_contact
+from app.services.operations import issues as operations_issues
 from app.workers.queue import AutomationEventJob, AutomationExecutionJob, JobQueue
 
 logger = logging.getLogger(__name__)
@@ -46,6 +73,22 @@ EVENT_TYPES = {
     "website_conversation_started",
     "website_lead_captured",
     "conversation_message_received",
+    "whatsapp_conversation_started",
+    "whatsapp_message_received",
+    "whatsapp_handoff_requested",
+    "email_conversation_started",
+    "email_message_received",
+    "email_handoff_requested",
+    "support_conversation_resolved",
+    # Phase 10: D2C Operations AI triggers (brief section 26).
+    "order_needs_attention",
+    "shipment_delayed",
+    "ndr_detected",
+    "rto_detected",
+    "inventory_low",
+    "refund_pending",
+    "sla_breached",
+    "operational_task_created",
 }
 CONDITION_FIELDS = {
     "event.source",
@@ -63,7 +106,30 @@ CONDITION_FIELDS = {
     "event.occurred_at",
 }
 OPERATORS = {"eq", "neq", "gt", "gte", "lt", "lte", "contains", "exists", "not_exists"}
-ACTION_TYPES = {"wait", "tag_customer", "create_task", "ai_generate", "send_message", "log"}
+ACTION_TYPES = {
+    "wait",
+    "tag_customer",
+    "create_task",
+    "ai_generate",
+    "send_message",
+    "send_whatsapp_text",
+    "send_whatsapp_template",
+    "send_email",
+    "send_email_template",
+    "log",
+    "create_issue",
+}
+# Steps whose external side effect must never be risked twice: a crash while one is RUNNING fails
+# the execution outright (see recover_due) rather than retrying a call that may have already gone
+# through to a paid AI vendor or a real WhatsApp/email recipient.
+EXTERNAL_CALL_ACTION_TYPES = {
+    "ai_generate",
+    "send_whatsapp_text",
+    "send_whatsapp_template",
+    "send_email",
+    "send_email_template",
+}
+OPERATIONAL_ISSUE_CATEGORIES = {category.value for category in IssueCategory}
 
 
 class InvalidWorkflow(ValueError):
@@ -117,7 +183,18 @@ def validate_definition(value: Any) -> dict[str, Any]:
             "create_task": {"type", "title"},
             "ai_generate": {"type", "prompt"},
             "send_message": {"type", "channel", "content"},
+            "send_whatsapp_text": {"type", "content", "consent_category"},
+            "send_whatsapp_template": {
+                "type",
+                "template_name",
+                "template_language",
+                "variables",
+                "consent_category",
+            },
+            "send_email": {"type", "subject", "content", "classification"},
+            "send_email_template": {"type", "template_id", "variables"},
             "log": {"type", "message"},
+            "create_issue": {"type", "category", "title"},
         }[kind]
         if set(action) - allowed:
             raise InvalidWorkflow("Action has unsupported fields.")
@@ -126,18 +203,76 @@ def validate_definition(value: Any) -> dict[str, Any]:
             or not 1 <= action["seconds"] <= MAX_DELAY_SECONDS
         ):
             raise InvalidWorkflow("Wait duration is invalid.")
-        if kind in {"tag_customer", "create_task", "ai_generate", "send_message", "log"}:
+        if kind in {
+            "tag_customer",
+            "create_task",
+            "ai_generate",
+            "send_message",
+            "send_whatsapp_text",
+            "log",
+            "create_issue",
+        }:
             key = {
                 "tag_customer": "tag",
                 "create_task": "title",
                 "ai_generate": "prompt",
                 "send_message": "content",
+                "send_whatsapp_text": "content",
                 "log": "message",
+                "create_issue": "title",
             }[kind]
             if not isinstance(action.get(key), str) or not 1 <= len(action[key]) <= 1000:
                 raise InvalidWorkflow("Action text is invalid.")
+        if kind == "create_issue" and action.get("category") not in OPERATIONAL_ISSUE_CATEGORIES:
+            raise InvalidWorkflow("Issue category is invalid.")
         if kind == "send_message" and action.get("channel") not in {"website"}:
             raise InvalidWorkflow("No messaging provider is configured for that channel.")
+        if kind in {"send_whatsapp_text", "send_whatsapp_template"} and action.get(
+            "consent_category"
+        ) not in {c.value for c in WhatsAppConsentCategory}:
+            raise InvalidWorkflow("WhatsApp consent category is invalid.")
+        if kind == "send_whatsapp_template":
+            name, language = action.get("template_name"), action.get("template_language")
+            if not isinstance(name, str) or not 1 <= len(name) <= 512:
+                raise InvalidWorkflow("WhatsApp template name is invalid.")
+            if not isinstance(language, str) or not 1 <= len(language) <= 20:
+                raise InvalidWorkflow("WhatsApp template language is invalid.")
+            variables = action.get("variables", {})
+            if not isinstance(variables, dict) or len(variables) > 20:
+                raise InvalidWorkflow("WhatsApp template variables must be a bounded object.")
+            for var_key, var_value in variables.items():
+                if (
+                    not isinstance(var_key, str)
+                    or not isinstance(var_value, str)
+                    or not 1 <= len(var_value) <= 500
+                ):
+                    raise InvalidWorkflow("WhatsApp template variables are invalid.")
+        if kind == "send_email":
+            subject, content = action.get("subject"), action.get("content")
+            if not isinstance(subject, str) or not 1 <= len(subject) <= 200:
+                raise InvalidWorkflow("Email subject is invalid.")
+            if not isinstance(content, str) or not 1 <= len(content) <= 5000:
+                raise InvalidWorkflow("Email content is invalid.")
+            if action.get("classification") not in {c.value for c in EmailClassification}:
+                raise InvalidWorkflow("Email classification is invalid.")
+        if kind == "send_email_template":
+            template_id = action.get("template_id")
+            if not isinstance(template_id, str):
+                raise InvalidWorkflow("Email template id is invalid.")
+            try:
+                uuid.UUID(template_id)
+            except ValueError:
+                raise InvalidWorkflow("Email template id is invalid.") from None
+            variables = action.get("variables", {})
+            if not isinstance(variables, dict) or len(variables) > 20:
+                raise InvalidWorkflow("Email template variables must be a bounded object.")
+            for var_key, var_value in variables.items():
+                if (
+                    not isinstance(var_key, str)
+                    or not isinstance(var_value, str)
+                    or not 1 <= len(var_value) <= 500
+                ):
+                    raise InvalidWorkflow("Email template variables are invalid.")
         clean.append(dict(action))
     return {"trigger": {"event": trigger["event"]}, "conditions": conditions, "actions": clean}
 
@@ -307,6 +442,181 @@ def dispatch_event(db: Session, event_id: uuid.UUID, queue: JobQueue) -> int:
     return len(created)
 
 
+def _latest_generated_text(db: Session, execution: AutomationExecution) -> str | None:
+    """The most recent completed ai_generate step's output in this execution, if any. Backs the
+    single bounded ``{{generated_text}}`` placeholder (see
+    ``whatsapp_send.resolve_generated_text``)."""
+    steps = db.scalars(
+        select(AutomationExecutionStep)
+        .where(
+            AutomationExecutionStep.execution_id == execution.id,
+            AutomationExecutionStep.status == StepStatus.COMPLETED,
+        )
+        .order_by(AutomationExecutionStep.step_index.desc())
+    )
+    for step in steps:
+        if step.action_snapshot.get("type") == "ai_generate" and step.safe_result:
+            text = step.safe_result.get("generated_text")
+            if isinstance(text, str):
+                return text
+    return None
+
+
+def _resolve_whatsapp_contact(
+    db: Session, execution: AutomationExecution
+) -> WhatsAppContact | None:
+    """The recipient for a send_whatsapp_* action, resolved from the event snapshot.
+
+    A WhatsApp-originated event already carries its own contact id. Any other event (a Shopify
+    order/customer event, a website lead) never carries a phone number in its snapshot -- by
+    design, snapshots are redacted to booleans/ids for PII -- so this loads the referenced
+    Customer or WebsiteLead row fresh from the database and resolves *that* phone, exactly as
+    ``tag_customer`` already resolves the same ids to mutate tags.
+    """
+    snapshot = execution.event_snapshot
+    whatsapp_ref = snapshot.get("whatsapp")
+    if isinstance(whatsapp_ref, dict) and whatsapp_ref.get("contact_id"):
+        try:
+            contact_id = uuid.UUID(str(whatsapp_ref["contact_id"]))
+        except ValueError:
+            return None
+        return db.scalar(
+            select(WhatsAppContact).where(
+                WhatsAppContact.id == contact_id,
+                WhatsAppContact.organization_id == execution.organization_id,
+            )
+        )
+    customer_ref = snapshot.get("customer", {})
+    raw_phone: str | None = None
+    customer_id = customer_ref.get("id") if isinstance(customer_ref, dict) else None
+    if customer_id:
+        try:
+            customer = db.scalar(
+                select(Customer).where(
+                    Customer.id == uuid.UUID(str(customer_id)),
+                    Customer.organization_id == execution.organization_id,
+                )
+            )
+        except ValueError:
+            customer = None
+        raw_phone = customer.phone if customer else None
+    lead_id = customer_ref.get("lead_id") if isinstance(customer_ref, dict) else None
+    if not raw_phone and lead_id:
+        try:
+            lead = db.scalar(
+                select(WebsiteLead).where(
+                    WebsiteLead.id == uuid.UUID(str(lead_id)),
+                    WebsiteLead.organization_id == execution.organization_id,
+                )
+            )
+        except ValueError:
+            lead = None
+        raw_phone = lead.phone if lead else None
+    if not raw_phone:
+        return None
+    connection = db.scalar(
+        select(WhatsAppConnection).where(
+            WhatsAppConnection.organization_id == execution.organization_id,
+            WhatsAppConnection.status == WhatsAppConnectionStatus.CONNECTED,
+        )
+    )
+    if connection is None:
+        return None
+    try:
+        phone_e164 = normalize_phone(raw_phone, default_country=connection.default_country)
+    except InvalidPhoneNumber:
+        return None
+    return get_or_create_contact(
+        db, organization_id=execution.organization_id, phone_e164=phone_e164
+    )
+
+
+def _resolve_email_recipient(db: Session, execution: AutomationExecution) -> Customer | None:
+    """The recipient for a send_email(_template) action, resolved from the event snapshot.
+    Mirrors ``_resolve_whatsapp_contact``'s "load fresh from the database, never trust a
+    snapshot's PII" rule -- an email-originated event already carries its own customer id; any
+    other event resolves the referenced Customer/WebsiteLead and uses *its* current email."""
+    snapshot = execution.event_snapshot
+    email_ref = snapshot.get("email")
+    customer_ref = snapshot.get("customer", {})
+    customer_id = customer_ref.get("id") if isinstance(customer_ref, dict) else None
+    if customer_id:
+        try:
+            customer = db.scalar(
+                select(Customer).where(
+                    Customer.id == uuid.UUID(str(customer_id)),
+                    Customer.organization_id == execution.organization_id,
+                )
+            )
+        except ValueError:
+            customer = None
+        if customer is not None and customer.email:
+            return customer
+    lead_id = customer_ref.get("lead_id") if isinstance(customer_ref, dict) else None
+    lead_email: str | None = None
+    if lead_id:
+        try:
+            lead = db.scalar(
+                select(WebsiteLead).where(
+                    WebsiteLead.id == uuid.UUID(str(lead_id)),
+                    WebsiteLead.organization_id == execution.organization_id,
+                )
+            )
+        except ValueError:
+            lead = None
+        lead_email = lead.email if lead else None
+    if not lead_email and isinstance(email_ref, dict):
+        lead_email = email_ref.get("address") if isinstance(email_ref.get("address"), str) else None
+    if not lead_email:
+        return None
+    from app.services.support.identity import get_or_create_customer
+
+    return get_or_create_customer(db, organization_id=execution.organization_id, email=lead_email)
+
+
+def _email_template_context(
+    db: Session, execution: AutomationExecution, customer: Customer
+) -> dict[str, Any]:
+    """A bounded render context for ``{{customer.*}}``/``{{order.*}}`` placeholders (see
+    ``services/email/templates.py``). Order fields are re-queried fresh by id, never trusted from
+    the (redacted) event snapshot."""
+    context: dict[str, Any] = {
+        "customer": {
+            "first_name": customer.first_name or "",
+            "last_name": customer.last_name or "",
+            "email": customer.email or "",
+        }
+    }
+    order_ref = execution.event_snapshot.get("order")
+    order_id = order_ref.get("id") if isinstance(order_ref, dict) else None
+    if order_id:
+        try:
+            order = db.scalar(
+                select(Order).where(
+                    Order.id == uuid.UUID(str(order_id)),
+                    Order.organization_id == execution.organization_id,
+                )
+            )
+        except ValueError:
+            order = None
+        if order is not None:
+            context["order"] = {
+                "number": order.order_number or "",
+                "status": order.fulfillment_status or order.financial_status or "",
+            }
+    return context
+
+
+def _email_connection(db: Session, organization_id: uuid.UUID) -> EmailConnection | None:
+    return db.scalar(
+        select(EmailConnection).where(
+            EmailConnection.organization_id == organization_id,
+            EmailConnection.status == WhatsAppConnectionStatus.CONNECTED,
+            EmailConnection.enabled.is_(True),
+        )
+    )
+
+
 def run_execution(db: Session, execution_id: uuid.UUID, queue: JobQueue) -> str:
     now = datetime.now(UTC)
     execution = db.scalar(
@@ -383,11 +693,261 @@ def run_execution(db: Session, execution_id: uuid.UUID, queue: JobQueue) -> str:
             step.finished_at = now
             db.commit()
             return "failed"
+        if action["type"] in ("send_whatsapp_text", "send_whatsapp_template"):
+            db.commit()
+            try:
+                contact = _resolve_whatsapp_contact(db, execution)
+                if contact is None:
+                    raise MessagingError(
+                        "invalid_recipient", "no WhatsApp contact could be resolved for this event"
+                    )
+                connection = db.scalar(
+                    select(WhatsAppConnection).where(
+                        WhatsAppConnection.organization_id == execution.organization_id,
+                        WhatsAppConnection.status == WhatsAppConnectionStatus.CONNECTED,
+                    )
+                )
+                if connection is None:
+                    raise MessagingError("unconfigured", "no connected WhatsApp number")
+                secrets = SecretManager.from_settings(get_settings())
+                access_token = whatsapp_send.decrypt_access_token(connection, secrets)
+                messaging_provider = get_messaging_provider()
+                category = WhatsAppConsentCategory(action["consent_category"])
+                idem_key = f"automation:{execution.id}:{index}"
+                generated_text = _latest_generated_text(db, execution)
+                safe_metadata = {"execution_id": str(execution.id), "step_index": index}
+                if action["type"] == "send_whatsapp_text":
+                    content = whatsapp_send.resolve_generated_text(
+                        action["content"], generated_text
+                    )
+                    result_row = whatsapp_send.send_text(
+                        db,
+                        organization_id=execution.organization_id,
+                        connection=connection,
+                        contact=contact,
+                        outbound=whatsapp_send.OutboundText(
+                            content=content, consent_category=category
+                        ),
+                        idempotency_key=idem_key,
+                        provider=messaging_provider,
+                        access_token=access_token,
+                        safe_metadata=safe_metadata,
+                        sender_type=SenderType.SYSTEM,
+                    )
+                else:
+                    variables = {
+                        key: whatsapp_send.resolve_generated_text(value, generated_text)
+                        for key, value in action.get("variables", {}).items()
+                    }
+                    result_row = whatsapp_send.send_template(
+                        db,
+                        organization_id=execution.organization_id,
+                        connection=connection,
+                        contact=contact,
+                        outbound=whatsapp_send.OutboundTemplate(
+                            template_name=action["template_name"],
+                            template_language=action["template_language"],
+                            variables=variables,
+                            consent_category=category,
+                        ),
+                        idempotency_key=idem_key,
+                        provider=messaging_provider,
+                        access_token=access_token,
+                        safe_metadata=safe_metadata,
+                        sender_type=SenderType.SYSTEM,
+                    )
+            except (MessagingError, SecretError) as exc:
+                retryable = isinstance(exc, MessagingError) and exc.retryable
+                error_code = (
+                    f"whatsapp_{exc.code if isinstance(exc, SecretError) else exc.code.value}"
+                )
+                if retryable and step.attempts < execution.max_attempts:
+                    execution.attempts += 1
+                    if execution.attempts >= execution.max_attempts:
+                        step.status, step.error_code = StepStatus.FAILED, "max_attempts_exceeded"
+                        execution.status, execution.error_code = (
+                            ExecutionStatus.FAILED,
+                            step.error_code,
+                        )
+                        execution.finished_at = now
+                        step.finished_at = now
+                        db.commit()
+                        return "failed"
+                    delay = min(3600, 15 * (2 ** max(0, step.attempts - 1)))
+                    step.status, step.error_code = StepStatus.RETRYING, error_code
+                    execution.status, execution.error_code = ExecutionStatus.RETRYING, error_code
+                    execution.next_run_at = datetime.now(UTC) + timedelta(seconds=delay)
+                    db.commit()
+                    return "retrying"
+                step.status, step.error_code = StepStatus.FAILED, error_code
+                execution.status, execution.error_code, execution.finished_at = (
+                    ExecutionStatus.FAILED,
+                    error_code,
+                    now,
+                )
+                step.finished_at = now
+                db.commit()
+                return "failed"
+            if result_row.status == WhatsAppMessageStatus.FAILED:
+                error_code = f"whatsapp_{result_row.error_code}"
+                step.status, step.error_code = StepStatus.FAILED, error_code
+                execution.status, execution.error_code, execution.finished_at = (
+                    ExecutionStatus.FAILED,
+                    error_code,
+                    now,
+                )
+                step.finished_at = now
+                db.commit()
+                return "failed"
+            step.status = StepStatus.COMPLETED
+            step.safe_result = {
+                "whatsapp_message_id": str(result_row.id),
+                "status": result_row.status.value,
+            }
+            step.finished_at = datetime.now(UTC)
+            execution.current_step += 1
+            execution.heartbeat_at = datetime.now(UTC)
+            db.commit()
+            continue
+        if action["type"] in ("send_email", "send_email_template"):
+            db.commit()
+            try:
+                customer = _resolve_email_recipient(db, execution)
+                if customer is None or not customer.email:
+                    raise EmailError(
+                        "invalid_recipient", "no email recipient could be resolved for this event"
+                    )
+                email_connection = _email_connection(db, execution.organization_id)
+                if email_connection is None:
+                    raise EmailError("unconfigured", "no connected, enabled email connection")
+                email_provider = get_email_provider()
+                idem_key = f"automation:{execution.id}:{index}"
+                generated_text = _latest_generated_text(db, execution)
+                safe_metadata = {"execution_id": str(execution.id), "step_index": index}
+                thread = email_threading.get_or_create_outbound_thread(
+                    db,
+                    organization_id=execution.organization_id,
+                    customer_id=customer.id,
+                    customer_email=customer.email,
+                    subject=action.get("subject") or "An update from us",
+                )
+                if action["type"] == "send_email":
+                    content = whatsapp_send.resolve_generated_text(
+                        action["content"], generated_text
+                    )
+                    email_result_row = email_send.send_email(
+                        db,
+                        organization_id=execution.organization_id,
+                        connection=email_connection,
+                        customer=customer,
+                        thread=thread,
+                        outbound=email_send.OutboundEmail(
+                            subject=action["subject"],
+                            text_body=content,
+                            html_body="",
+                            classification=EmailClassification(action["classification"]),
+                        ),
+                        idempotency_key=idem_key,
+                        provider=email_provider,
+                        sender_type=SenderType.SYSTEM,
+                        safe_metadata=safe_metadata,
+                    )
+                else:
+                    template = db.scalar(
+                        select(EmailTemplate).where(
+                            EmailTemplate.id == uuid.UUID(action["template_id"]),
+                            EmailTemplate.organization_id == execution.organization_id,
+                            EmailTemplate.status == EmailTemplateStatus.ACTIVE,
+                        )
+                    )
+                    if template is None:
+                        raise EmailError("unconfigured", "email template is missing or not active")
+                    context = _email_template_context(db, execution, customer)
+                    variables = {
+                        key: whatsapp_send.resolve_generated_text(value, generated_text)
+                        for key, value in action.get("variables", {}).items()
+                    }
+                    context["vars"] = variables
+                    subject, html_body, text_body = email_templates.render_template(
+                        subject=template.subject,
+                        body_html=template.body_html,
+                        body_text=template.body_text,
+                        context=context,
+                    )
+                    email_result_row = email_send.send_email(
+                        db,
+                        organization_id=execution.organization_id,
+                        connection=email_connection,
+                        customer=customer,
+                        thread=thread,
+                        outbound=email_send.OutboundEmail(
+                            subject=subject,
+                            text_body=text_body,
+                            html_body=html_body,
+                            classification=template.type,
+                            template_id=template.id,
+                        ),
+                        idempotency_key=idem_key,
+                        provider=email_provider,
+                        sender_type=SenderType.SYSTEM,
+                        safe_metadata=safe_metadata,
+                    )
+            except EmailError as exc:
+                retryable = exc.retryable
+                error_code = f"email_{exc.code.value}"
+                if retryable and step.attempts < execution.max_attempts:
+                    execution.attempts += 1
+                    if execution.attempts >= execution.max_attempts:
+                        step.status, step.error_code = StepStatus.FAILED, "max_attempts_exceeded"
+                        execution.status, execution.error_code = (
+                            ExecutionStatus.FAILED,
+                            step.error_code,
+                        )
+                        execution.finished_at = now
+                        step.finished_at = now
+                        db.commit()
+                        return "failed"
+                    delay = min(3600, 15 * (2 ** max(0, step.attempts - 1)))
+                    step.status, step.error_code = StepStatus.RETRYING, error_code
+                    execution.status, execution.error_code = ExecutionStatus.RETRYING, error_code
+                    execution.next_run_at = datetime.now(UTC) + timedelta(seconds=delay)
+                    db.commit()
+                    return "retrying"
+                step.status, step.error_code = StepStatus.FAILED, error_code
+                execution.status, execution.error_code, execution.finished_at = (
+                    ExecutionStatus.FAILED,
+                    error_code,
+                    now,
+                )
+                step.finished_at = now
+                db.commit()
+                return "failed"
+            if email_result_row.status == EmailMessageStatus.FAILED:
+                error_code = f"email_{email_result_row.error_code}"
+                step.status, step.error_code = StepStatus.FAILED, error_code
+                execution.status, execution.error_code, execution.finished_at = (
+                    ExecutionStatus.FAILED,
+                    error_code,
+                    now,
+                )
+                step.finished_at = now
+                db.commit()
+                return "failed"
+            step.status = StepStatus.COMPLETED
+            step.safe_result = {
+                "email_message_id": str(email_result_row.id),
+                "status": email_result_row.status.value,
+            }
+            step.finished_at = datetime.now(UTC)
+            execution.current_step += 1
+            execution.heartbeat_at = datetime.now(UTC)
+            db.commit()
+            continue
         if action["type"] == "ai_generate":
             db.commit()
             try:
-                provider = get_llm_provider()
-                response = provider.generate(
+                llm_provider = get_llm_provider()
+                response = llm_provider.generate(
                     AIRequest(
                         messages=[
                             ChatMessage(
@@ -535,6 +1095,33 @@ def run_execution(db: Session, execution_id: uuid.UUID, queue: JobQueue) -> str:
             execution.current_step += 1
             db.commit()
             continue
+        if action["type"] == "create_issue":
+            customer_ref = execution.event_snapshot.get("customer", {}).get("id")
+            order_ref = execution.event_snapshot.get("order", {}).get("id")
+            try:
+                customer_id = uuid.UUID(str(customer_ref)) if customer_ref else None
+            except ValueError:
+                customer_id = None
+            try:
+                order_id = uuid.UUID(str(order_ref)) if order_ref else None
+            except ValueError:
+                order_id = None
+            issue = operations_issues.create_issue(
+                db,
+                organization_id=execution.organization_id,
+                category=IssueCategory(action["category"]),
+                title=action["title"],
+                customer_id=customer_id,
+                order_id=order_id,
+                detected_by=DetectedBy.RULE,
+                now=now,
+            )
+            step.status = StepStatus.COMPLETED
+            step.safe_result = {"issue_id": str(issue.id), "category": issue.category.value}
+            step.finished_at = now
+            execution.current_step += 1
+            db.commit()
+            continue
         if action["type"] == "create_task":
             task = AutomationTask(
                 id=uuid.uuid4(),
@@ -614,21 +1201,28 @@ def recover_due(db: Session, queue: JobQueue, *, stale_seconds: int = 120, limit
                     AutomationExecutionStep.step_index == row.current_step,
                 )
             )
-            # An AI provider may have accepted the request just before a crash. Fail that unknown
-            # outcome rather than repeating a potentially billable provider call.
+            # An AI provider (or the WhatsApp provider) may have accepted the request just before
+            # a crash. Fail that unknown outcome rather than repeating a potentially billable AI
+            # call or risking a duplicate WhatsApp delivery.
+            action_kind = step.action_snapshot.get("type") if step is not None else None
             if (
                 step is not None
                 and step.status == StepStatus.RUNNING
-                and step.action_snapshot.get("type") == "ai_generate"
+                and action_kind in EXTERNAL_CALL_ACTION_TYPES
             ):
+                lost_code = (
+                    "worker_lost_during_ai_call"
+                    if action_kind == "ai_generate"
+                    else "worker_lost_during_whatsapp_send"
+                )
                 step.status, step.error_code, step.finished_at = (
                     StepStatus.FAILED,
-                    "worker_lost_during_ai_call",
+                    lost_code,
                     now,
                 )
                 row.status, row.error_code, row.finished_at = (
                     ExecutionStatus.FAILED,
-                    "worker_lost_during_ai_call",
+                    lost_code,
                     now,
                 )
             else:

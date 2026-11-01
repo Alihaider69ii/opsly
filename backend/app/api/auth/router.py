@@ -5,6 +5,7 @@ from app.core.rate_limit import rate_limit
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse
 from app.schemas.user import UserOut
 from app.services.auth import service
+from app.services.platform import service as platform_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -30,13 +31,19 @@ def register(body: RegisterRequest, db: DbSession) -> UserOut:
 @router.post("/login", response_model=TokenResponse, dependencies=[Depends(rate_limit("login"))])
 def login(body: LoginRequest, db: DbSession) -> TokenResponse:
     try:
-        return service.login(db, email=body.email, password=body.password)
+        result = service.login(db, email=body.email, password=body.password)
     except service.AuthenticationError:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "Invalid email or password",
             headers={"WWW-Authenticate": "Bearer"},
         ) from None
+    if result.user.is_platform_admin:
+        platform_service.record_audit(
+            db, actor_user_id=result.user.id, event_type="PLATFORM_ADMIN_LOGIN"
+        )
+        db.commit()
+    return result
 
 
 @router.get("/me", response_model=UserOut)

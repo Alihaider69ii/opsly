@@ -114,12 +114,15 @@ def resolve_org_context(
     """Resolve the organization a request acts on, proving the user is a member of it.
 
     With an explicit id, returns None unless this user has a membership row for exactly that
-    organization. Without one, falls back to the user's earliest membership.
+    organization. Without one, falls back to the user's earliest membership. A deactivated brand
+    (Organization.is_active = False) is invisible here -- its own members can no longer act on it,
+    the same "does not confirm existence" 404/403 as a non-member (brief section 7/48).
     """
     stmt = (
         select(OrganizationMember)
+        .join(Organization, OrganizationMember.organization_id == Organization.id)
         .options(joinedload(OrganizationMember.organization))
-        .where(OrganizationMember.user_id == user.id)
+        .where(OrganizationMember.user_id == user.id, Organization.is_active.is_(True))
     )
     if organization_id is not None:
         stmt = stmt.where(OrganizationMember.organization_id == organization_id)
@@ -129,6 +132,27 @@ def resolve_org_context(
     if membership is None:
         return None
     return OrgContext(user=user, organization=membership.organization, role=membership.role)
+
+
+def resolve_platform_admin_org_context(
+    db: Session, admin: User, organization_id: uuid.UUID
+) -> OrgContext | None:
+    """View-as-brand (brief sections 12-14): a platform admin has no membership row in the target
+    organization, so this is a deliberately separate resolver from resolve_org_context, never a
+    bolt-on to it. The caller (api/deps.py) is responsible for verifying ``admin.is_platform_admin``
+    before calling this -- it is not re-checked here so this function's only job is "does this
+    organization exist", matching resolve_org_context's shape.
+
+    The returned context carries the admin's own real identity as ``user`` (brief section 13: never
+    a synthetic brand-user actor) with an OWNER-equivalent role, so the existing ManagerOrg/
+    role-gated routes work unchanged for inspection/demo purposes. Unlike resolve_org_context, a
+    deactivated brand IS still visible here -- health inspection is exactly why an admin would open
+    it.
+    """
+    org = db.get(Organization, organization_id)
+    if org is None:
+        return None
+    return OrgContext(user=admin, organization=org, role=OrganizationRole.OWNER)
 
 
 def list_members(db: Session, ctx: OrgContext) -> list[OrganizationMember]:

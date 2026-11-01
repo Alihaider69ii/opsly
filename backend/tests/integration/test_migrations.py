@@ -77,7 +77,7 @@ def test_upgrade_downgrade_upgrade_cycle_preserves_earlier_data():
 
 def test_there_is_a_single_head_revision():
     script = ScriptDirectory.from_config(alembic_config(TEST_DATABASE_URL))
-    assert script.get_heads() == ["0007"]
+    assert script.get_heads() == ["0012"]
 
 
 def test_models_and_migrated_schema_agree(pg_engine):
@@ -217,7 +217,10 @@ def test_chat_schema_has_the_expected_constraints(pg_engine):
         )
     }
     assert "FOREIGN KEY (conversation_id, organization_id)" in fks["fk_messages_conversation_org"]
-    assert all("ON DELETE CASCADE" in d for d in fks.values())
+    assert "ON DELETE CASCADE" in fks["fk_messages_conversation_org"]
+    # Phase 9: sender_user_id -> users.id is deliberately ON DELETE SET NULL (a deleted staff
+    # account must not cascade-delete the conversation history it participated in).
+    assert "ON DELETE SET NULL" in fks["fk_messages_sender_user_id_users"]
     uniques = {
         r[0] for r in rows(pg_engine, "SELECT conname FROM pg_constraint WHERE contype = 'u'")
     }
@@ -501,6 +504,23 @@ def test_the_whole_chain_runs_up_down_and_up_again_on_an_empty_database():
             "automation_execution_steps",
             "website_leads",
             "automation_tasks",
+            "whatsapp_connections",
+            "whatsapp_contacts",
+            "whatsapp_consents",
+            "whatsapp_suppressions",
+            "whatsapp_conversations",
+            "whatsapp_messages",
+            "whatsapp_templates",
+            "whatsapp_webhook_events",
+            "support_conversations",
+            "support_timeline_events",
+            "email_connections",
+            "email_threads",
+            "email_messages",
+            "email_templates",
+            "email_campaigns",
+            "email_campaign_recipients",
+            "email_webhook_events",
         } <= tables_at_head
 
         command.downgrade(cfg, "base")
@@ -516,6 +536,118 @@ def test_the_whole_chain_runs_up_down_and_up_again_on_an_empty_database():
             for r in rows(engine, "SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
         }
         assert again == tables_at_head
-        assert scalar(engine, "SELECT version_num FROM alembic_version") == "0007"
+        assert scalar(engine, "SELECT version_num FROM alembic_version") == "0012"
     finally:
         engine.dispose()
+
+
+EMAIL_TABLES = (
+    "email_connections",
+    "email_threads",
+    "email_messages",
+    "email_templates",
+    "email_campaigns",
+    "email_campaign_recipients",
+    "email_webhook_events",
+)
+SUPPORT_TABLES = ("support_conversations", "support_timeline_events")
+
+
+def test_phase9_migration_is_additive_and_reversible_without_touching_earlier_data():
+    recreate_database(SCRATCH_URL)
+    cfg = alembic_config(SCRATCH_URL)
+    engine = create_engine(SCRATCH_URL)
+    try:
+        command.upgrade(cfg, "0009")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO organizations (id, name, slug) "
+                    "VALUES ('99999999-9999-9999-9999-999999999999', 'Acme', 'acme')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO customers (id, organization_id, email, phone) VALUES "
+                    "('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', "
+                    "'99999999-9999-9999-9999-999999999999', 'a@example.com', NULL)"
+                )
+            )
+        for table in EMAIL_TABLES + SUPPORT_TABLES:
+            assert scalar(engine, f"SELECT to_regclass('public.{table}') IS NULL"), table
+
+        command.upgrade(cfg, "0010")
+        for table in EMAIL_TABLES + SUPPORT_TABLES:
+            assert scalar(engine, f"SELECT to_regclass('public.{table}') IS NOT NULL"), table
+        assert scalar(engine, "SELECT count(*) FROM customers") == 1
+        assert (
+            scalar(
+                engine,
+                "SELECT normalized_email FROM customers WHERE email = 'a@example.com'",
+            )
+            is None
+        )  # Phase 9 adds the column but never backfills existing rows automatically
+
+        command.downgrade(cfg, "0009")
+        for table in EMAIL_TABLES + SUPPORT_TABLES:
+            assert scalar(engine, f"SELECT to_regclass('public.{table}') IS NULL"), table
+        assert scalar(engine, "SELECT count(*) FROM customers") == 1
+        assert scalar(engine, "SELECT count(*) FROM organizations") == 1
+
+        command.upgrade(cfg, "head")
+        for table in EMAIL_TABLES + SUPPORT_TABLES:
+            assert scalar(engine, f"SELECT to_regclass('public.{table}') IS NOT NULL"), table
+    finally:
+        engine.dispose()
+
+
+def test_phase9_schema_has_the_expected_constraints(pg_engine):
+    uniques = _constraints(pg_engine, "u")
+    assert {
+        "uq_support_conversations_org_channel_conversation",
+        "uq_email_connections_organization_id",
+        "uq_email_connections_inbound_address",
+        "uq_email_messages_org_idempotency",
+        "uq_email_messages_org_provider_id",
+        "uq_email_campaign_recipients_org_campaign_customer",
+        "uq_email_webhook_events_dedupe",
+    } <= set(uniques)
+
+    fks = _constraints(pg_engine, "f")
+    expect = {
+        "fk_support_conversations_customer_org": "FOREIGN KEY (customer_id, organization_id)",
+        "fk_support_timeline_events_conversation_org": (
+            "FOREIGN KEY (support_conversation_id, organization_id)"
+        ),
+        "fk_email_messages_thread_org": "FOREIGN KEY (thread_id, organization_id)",
+        "fk_email_campaign_recipients_campaign_org": ("FOREIGN KEY (campaign_id, organization_id)"),
+        "fk_conversations_customer_org": "FOREIGN KEY (customer_id, organization_id)",
+    }
+    for name, fragment in expect.items():
+        assert fragment in fks[name], name
+    assert "ON DELETE CASCADE" in fks["fk_support_timeline_events_conversation_org"]
+    assert "ON DELETE SET NULL" in fks["fk_support_conversations_customer_org"]
+
+    # idempotency: a campaign can never queue two sends to the same customer (brief section 19)
+    recipient_unique = scalar(
+        pg_engine,
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'uq_email_campaign_recipients_org_campaign_customer'",
+    )
+    assert "(organization_id, campaign_id, customer_id)" in recipient_unique
+
+
+def test_phase9_no_plaintext_secret_column(pg_engine):
+    """Email credentials are process-wide settings (never stored per row, see
+    app/services/email/factory.py); confirm no email table grew a secret-shaped column."""
+    columns = {
+        r[1]
+        for r in rows(
+            pg_engine,
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = ANY(:t)",
+            t=list(EMAIL_TABLES),
+        )
+    }
+    for forbidden in ("api_key", "access_token", "password", "client_secret", "token"):
+        assert forbidden not in columns, forbidden

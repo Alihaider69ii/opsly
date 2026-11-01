@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.core.logging import log_event
 from app.db.models import (
+    AIHandoffState,
     ChatWidget,
     Conversation,
     ConversationChannel,
@@ -29,11 +30,14 @@ from app.db.models import (
     Message,
     MessageRole,
     Organization,
+    SenderType,
+    SupportChannel,
 )
 from app.db.models.chat import PUBLIC_KEY_PREFIX
 from app.db.scoping import scoped_select
 from app.services.ai.agent import AssistantUnavailable, ChatAgent
 from app.services.ai.provider import ChatMessage
+from app.services.support import conversations as support_service
 
 logger = logging.getLogger(__name__)
 
@@ -276,7 +280,14 @@ def _release(db: Session, conversation: Conversation) -> None:
 
 
 def _add_message(
-    db: Session, conversation: Conversation, role: MessageRole, content: str, meta=None
+    db: Session,
+    conversation: Conversation,
+    role: MessageRole,
+    content: str,
+    meta=None,
+    *,
+    sender_type: SenderType | None = None,
+    sender_user_id=None,
 ) -> Message:
     """Append a message. Only called while holding the conversation lock, so positions are safe."""
     db.refresh(conversation)
@@ -289,10 +300,27 @@ def _add_message(
         role=role,
         content=content,
         meta=meta,
+        sender_type=sender_type,
+        sender_user_id=sender_user_id,
     )
     db.add(message)
     db.commit()
     return message
+
+
+def _ai_state_for(db: Session, conversation: Conversation) -> AIHandoffState:
+    """Phase 9: website has no prior per-channel handoff concept, so the unified
+    ``SupportConversation`` row is authoritative here (see
+    ``app/services/support/conversations.py`` module docstring). No row yet (before the first
+    sync) means nothing has happened yet, i.e. AI_ACTIVE."""
+    row = db.scalar(
+        select(support_service.SupportConversation.ai_state).where(
+            support_service.SupportConversation.organization_id == conversation.organization_id,
+            support_service.SupportConversation.channel == SupportChannel.WEBSITE,
+            support_service.SupportConversation.channel_conversation_id == conversation.id,
+        )
+    )
+    return row or AIHandoffState.AI_ACTIVE
 
 
 def send_message(
@@ -303,12 +331,14 @@ def send_message(
     content: str,
     agent: ChatAgent,
     settings: Settings,
-) -> Message:
+) -> Message | None:
     """One full turn: store the customer's message, produce a grounded reply, store it.
 
-    Raises ConversationClosed/ConversationLimitReached/ConversationBusy before doing any work, and
-    AssistantUnavailable if the reply could not be produced (the customer's message stays stored,
-    so nothing the visitor said is lost, and the conversation is unlocked either way).
+    Returns ``None`` (never a fake reply) if a human has taken over this conversation -- the
+    customer's message is still stored, but the AI never auto-replies while a human is active
+    (brief section 7). Raises ConversationClosed/ConversationLimitReached/ConversationBusy before
+    doing any work, and AssistantUnavailable if the reply could not be produced (the customer's
+    message stays stored either way).
     """
     org_id = widget.organization_id
     if conversation.status != ConversationStatus.OPEN:
@@ -320,7 +350,7 @@ def send_message(
     try:
         history = recent_history(db, conversation, settings.chat_history_limit)
         business_name = db.scalar(select(Organization.name).where(Organization.id == org_id)) or ""
-        _add_message(db, conversation, MessageRole.USER, content)
+        _add_message(db, conversation, MessageRole.USER, content, sender_type=SenderType.CUSTOMER)
         log_event(
             logger,
             "chat.message_received",
@@ -329,6 +359,49 @@ def send_message(
             chars=len(content),
             history=len(history),
         )
+        ai_state = _ai_state_for(db, conversation)
+        support_service.sync_conversation(
+            db,
+            organization_id=org_id,
+            channel=SupportChannel.WEBSITE,
+            channel_conversation_id=conversation.id,
+            ai_state=ai_state,
+            direction="inbound",
+            sender_type=SenderType.CUSTOMER,
+            event_type="website_message",
+            customer_id=conversation.customer_id,
+            message_preview=content[:300],
+        )
+        db.commit()
+        from app.services.automation import ingest_event
+        from app.workers.queue import get_job_queue
+
+        is_first_message = conversation.message_count == 1
+        ingest_event(
+            db,
+            get_job_queue(),
+            organization_id=org_id,
+            event_type=(
+                "website_conversation_started"
+                if is_first_message
+                else "conversation_message_received"
+            ),
+            source="website",
+            source_id=str(conversation.id),
+            dedupe_key=f"website:message:{conversation.id}:{conversation.message_count}",
+            payload={
+                "event": {"source": "website"},
+                "customer": {
+                    "exists": conversation.customer_id is not None,
+                    "id": str(conversation.customer_id) if conversation.customer_id else None,
+                },
+                "website": {"conversation_id": str(conversation.id)},
+            },
+        )
+
+        if ai_state != AIHandoffState.AI_ACTIVE:
+            return None
+
         # No database transaction stays open while the embedding and LLM calls run.
         db.rollback()
         try:
@@ -343,8 +416,25 @@ def send_message(
         finally:
             db.rollback()
         assistant = _add_message(
-            db, conversation, MessageRole.ASSISTANT, reply.content, reply.audit()
+            db,
+            conversation,
+            MessageRole.ASSISTANT,
+            reply.content,
+            reply.audit(),
+            sender_type=SenderType.AI,
         )
+        support_service.sync_conversation(
+            db,
+            organization_id=org_id,
+            channel=SupportChannel.WEBSITE,
+            channel_conversation_id=conversation.id,
+            ai_state=ai_state,
+            direction="outbound",
+            sender_type=SenderType.AI,
+            event_type="ai_reply",
+            customer_id=conversation.customer_id,
+        )
+        db.commit()
         log_event(
             logger,
             "chat.response_stored",

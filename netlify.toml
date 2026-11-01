@@ -1,0 +1,28 @@
+# Netlify configuration for the Next.js dashboard (frontend/). The backend (FastAPI), worker,
+# PostgreSQL and Redis are NOT hosted on Netlify -- see docs/production.md and
+# docs/deployment-readiness.md for that topology.
+#
+# Required site environment variables (set in the Netlify UI, never committed here):
+#   API_URL              - server-side (Next server -> FastAPI) backend origin, e.g. https://api.yourdomain.com
+#   NEXT_PUBLIC_API_URL   - same origin, exposed to the browser for the public chat-widget embed snippet
+#   NEXT_PUBLIC_APP_URL   - this site's own https origin, used in the same embed snippet
+# Do not reuse the docker-compose.production.yml value of API_URL (http://api:8000) here -- that is
+# an internal Docker network hostname and is not reachable from Netlify.
+
+[build]
+  base = "frontend"
+  # The widget (../widget) is a separate package whose build output (widget.js) must exist in
+  # frontend/public/ before `next build` runs. Netlify only builds the `base` directory by default,
+  # so the widget build is chained in front of the frontend build here -- without this, `next build`
+  # still succeeds but the deployed site 404s on /widget.js (see docs/deployment-readiness.md).
+  command = "cd ../widget && npm ci && npm run build && cd ../frontend && npm run build"
+
+[build.environment]
+  # Matches the Node version pinned in frontend/Dockerfile (node:22-alpine).
+  NODE_VERSION = "22"
+
+# No [[plugins]] block: per Netlify's current Next.js docs, the OpenNext adapter that runs Next.js
+# on Netlify is auto-detected from `next` in package.json and applied with zero configuration.
+# Declaring [[plugins]] package = "@netlify/plugin-nextjs" here is only needed to PIN a specific
+# adapter version, which also requires adding that package to frontend/package.json -- Netlify
+# itself recommends against pinning so the adapter stays current automatically.

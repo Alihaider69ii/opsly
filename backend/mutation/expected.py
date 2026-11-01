@@ -5,5 +5,4 @@ change: the right response is to document it, not to write a test that cannot fa
 survive (it proves the runner does not call every change a "kill").
 """
 
-EXPECTED_SURVIVORS = {
-}
+EXPECTED_SURVIVORS = {}

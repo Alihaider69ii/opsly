@@ -28,6 +28,17 @@ frontend/public/widget.js
 Thumbs.db
 .idea/
 
+# Internal planning/prompt notes dropped in .vscode/ (settings.json itself stays tracked)
+.vscode/*.md
+
+# Root-level phase prompt/history files -- development scratch, not part of the shipped repo.
+# Listed individually by design (not a phase*.md pattern) so a future legitimate root doc isn't
+# accidentally swept up.
+/phase8.1.md
+/phase8_prompt.md
+/phase9.md
+/phase_10prompt.md
+
 # Key material and anything that can hold customer data must never be committed
 *.pem
 *.key

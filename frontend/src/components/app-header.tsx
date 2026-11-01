@@ -3,9 +3,13 @@ import { logout } from "@/app/(auth)/actions";
 
 const links = [
   { href: "/dashboard", label: "Dashboard", key: "dashboard" },
+  { href: "/operations", label: "Operations", key: "operations" },
+  { href: "/support", label: "Support", key: "support" },
   { href: "/knowledge", label: "Knowledge Base", key: "knowledge" },
   { href: "/website-chat", label: "Website Chat", key: "website-chat" },
   { href: "/integrations/shopify", label: "Shopify", key: "shopify" },
+  { href: "/whatsapp", label: "WhatsApp", key: "whatsapp" },
+  { href: "/email", label: "Email", key: "email" },
   { href: "/automations", label: "Automations", key: "automations" },
 ] as const;
 

@@ -146,12 +146,75 @@ def _check_shopify(settings: Settings, problems: list[str]) -> None:
         problems.append("SHOPIFY_WEBHOOK_BASE_URL must be an https:// URL (Shopify requires it)")
 
 
+def _check_whatsapp(settings: Settings, problems: list[str]) -> None:
+    has_id = bool(settings.whatsapp_app_id.strip())
+    has_secret = bool(
+        settings.whatsapp_app_secret and settings.whatsapp_app_secret.get_secret_value().strip()
+    )
+    if has_id != has_secret:
+        problems.append("WHATSAPP_APP_ID and WHATSAPP_APP_SECRET must be set together")
+    if not settings.whatsapp_configured:
+        return
+    try:
+        SecretManager.from_settings(settings)
+    except SecretError as exc:
+        problems.append(
+            f"WhatsApp is configured but SECRET_ENCRYPTION_KEY is unusable (code={exc.code}); "
+            "tokens could not be stored safely"
+        )
+    if not settings.whatsapp_webhooks_disabled:
+        verify_token = (
+            settings.whatsapp_webhook_verify_token.get_secret_value().strip()
+            if settings.whatsapp_webhook_verify_token
+            else ""
+        )
+        if not verify_token:
+            problems.append(
+                "set WHATSAPP_WEBHOOK_VERIFY_TOKEN (configured in the Meta App's webhook "
+                "subscription) or explicitly WHATSAPP_WEBHOOKS_DISABLED=true: receiving inbound "
+                "messages and delivery status must be a decision, not an accident"
+            )
+
+
+def _check_email(settings: Settings, problems: list[str], warnings: list[str]) -> None:
+    if not settings.email_configured:
+        return
+    if not settings.email_webhooks_disabled:
+        secret = (
+            settings.email_webhook_secret.get_secret_value().strip()
+            if settings.email_webhook_secret
+            else ""
+        )
+        if not secret:
+            problems.append(
+                "set EMAIL_WEBHOOK_SECRET (the provider's signing secret) or explicitly "
+                "EMAIL_WEBHOOKS_DISABLED=true: receiving inbound email and delivery status must "
+                "be a decision, not an accident"
+            )
+        if settings.email_inbound_domain.endswith(".invalid"):
+            problems.append(
+                "EMAIL_INBOUND_DOMAIN is still the placeholder (.invalid) domain; set it to a "
+                "real domain verified with the email provider before inbound email can route "
+                "anywhere"
+            )
+
+
 def _check_ai(settings: Settings, problems: list[str]) -> None:
     for label, resolve in (("LLM", resolve_llm_config), ("EMBEDDING", resolve_embedding_config)):
         try:
             resolve(settings)
         except AIError as exc:  # the message names the setting, never a key
             problems.append(f"{label} provider is not usable: {exc}")
+
+
+def _check_platform_admin(settings: Settings, problems: list[str]) -> None:
+    """PLATFORM_ADMIN_* only configures the seed command, not request handling -- but a weak or
+    placeholder value there would still mean a guessable founder/platform login in production."""
+    if settings.platform_admin_password is None:
+        return
+    reason = _weak_secret(settings.platform_admin_password.get_secret_value())
+    if reason:
+        problems.append(f"PLATFORM_ADMIN_PASSWORD {reason}")
 
 
 def check_configuration(settings: Settings, environ: Mapping[str, str] | None = None) -> Findings:
@@ -183,7 +246,10 @@ def check_configuration(settings: Settings, environ: Mapping[str, str] | None = 
         )
 
     _check_shopify(settings, problems)
+    _check_whatsapp(settings, problems)
+    _check_email(settings, problems, warnings)
     _check_ai(settings, problems)
+    _check_platform_admin(settings, problems)
 
     if settings.log_level == "DEBUG":
         problems.append("LOG_LEVEL=DEBUG is not allowed in production (use INFO)")

@@ -6,8 +6,14 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.services.ai.catalog import non_production_provider_ids
+from app.services.email.catalog import (
+    non_production_provider_ids as email_non_production_provider_ids,
+)
 from app.services.integrations.shopify.scopes import DEFAULT_SCOPES
 from app.services.integrations.shopify.versioning import CURRENT_API_VERSION, is_quarterly_version
+from app.services.messaging.catalog import (
+    non_production_provider_ids as messaging_non_production_provider_ids,
+)
 
 MIN_JWT_SECRET_LENGTH = 32
 _PROVIDER_ID = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -139,6 +145,12 @@ class Settings(BaseSettings):
     secret_encryption_key_id: str = "1"
     secret_encryption_previous_keys: SecretStr | None = None
 
+    # --- Platform admin (development/demo seed only; see tools/seed_platform_admin.py) --------
+    # Read only by that seed command, never by request-handling code -- a platform admin is just
+    # a User row with is_platform_admin=True, authenticated through the normal /api/auth/login.
+    platform_admin_email: str | None = None
+    platform_admin_password: SecretStr | None = None
+
     # --- Shopify -----------------------------------------------------------------------------
     # The Shopify app's credentials (Dev Dashboard / Partner Dashboard). The client secret signs
     # OAuth callbacks and webhooks and is exchanged for tokens; it never leaves the server.
@@ -172,6 +184,108 @@ class Settings(BaseSettings):
     # How often the worker checks that each store still has BizFlow's webhook subscriptions
     # (Shopify deletes API-created ones after 8 consecutive failed deliveries) and repairs them.
     shopify_webhook_audit_interval_seconds: int = Field(default=3600, ge=60)
+
+    # --- WhatsApp (Business Platform) ---------------------------------------------------------
+    # Platform-level Meta App credentials: the app secret authenticates every webhook delivery
+    # (X-Hub-Signature-256 over the raw body) and is shared by every organization's connection;
+    # the verify token is echoed back during the GET handshake. Per-organization phone number id,
+    # WABA id and access token are entered per connection and stored encrypted; never here.
+    whatsapp_app_id: str = ""
+    whatsapp_app_secret: SecretStr | None = None
+    whatsapp_webhook_verify_token: SecretStr | None = None
+    # Graph API versions stay supported for a bounded window after release and Meta deprecates
+    # older ones on a schedule. Bumped in Phase 7: a live fetch of Meta's own current send-message
+    # guide (https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-messages, Oct
+    # 2026) used v26.0 in its example request, so v21.0 (set in Phase 6, now several versions
+    # behind) risked aging into the deprecation window. Only the default for NEW connections: an
+    # existing connection keeps the api_version it was created with (see
+    # api/integrations/whatsapp.py).
+    whatsapp_api_version: str = "v26.0"
+    # "" = https://graph.facebook.com. There is no dev base-url override (contrast
+    # SHOPIFY_DEV_BASE_URL): manual-token connect makes no redirect, so the "fake" provider below
+    # (which makes no HTTP call at all) is the offline/dev path instead.
+    whatsapp_graph_base_url: str = ""
+    # "whatsapp_cloud" (real) or "fake" (offline development/test only; refused in production,
+    # see services/messaging/catalog.py).
+    whatsapp_messaging_provider: str = "whatsapp_cloud"
+    whatsapp_webhook_max_body_bytes: int = Field(default=1_000_000, ge=1024)
+    whatsapp_request_timeout_seconds: float = Field(default=20.0, gt=0)
+    whatsapp_max_retries: int = Field(default=3, ge=0, le=10)
+    whatsapp_webhook_retention_days: int = Field(default=30, ge=1)
+    # Outbound sends allowed per organization per window: a runaway workflow loop cannot generate
+    # unlimited WhatsApp messages.
+    whatsapp_send_rate_limit: int = Field(default=60, ge=1)
+    whatsapp_send_rate_window_seconds: int = Field(default=60, ge=1)
+    whatsapp_connect_rate_limit: int = Field(default=10, ge=1)
+    whatsapp_template_sync_rate_limit: int = Field(default=5, ge=1)
+    whatsapp_customer_service_window_hours: int = Field(default=24, ge=1, le=72)
+    # Set when this deployment deliberately has no public WhatsApp webhook endpoint configured in
+    # the Meta App dashboard (inbound messages and status updates are then never received).
+    # Mirrors SHOPIFY_WEBHOOKS_DISABLED: production requires this to be an explicit decision.
+    whatsapp_webhooks_disabled: bool = False
+
+    # --- WhatsApp AI conversation layer (Phase 8) ---------------------------------------------
+    # Deployment-wide defaults, shown when an organization has not set its own
+    # WhatsAppConnection.ai_fallback_message / ai_handoff_message (both nullable, see
+    # app/db/models/whatsapp.py). Reuses the RAG/LLM settings above (RAG_TOP_K,
+    # RAG_SIMILARITY_THRESHOLD, RAG_MAX_CONTEXT_CHARS, LLM_MAX_OUTPUT_TOKENS) -- there is no
+    # separate WhatsApp RAG configuration, by design (see docs/phase-8-progress.md).
+    whatsapp_ai_fallback_message: str = (
+        "I don't have enough information to confirm that. I can connect you with the team for help."
+    )
+    whatsapp_ai_handoff_message: str = "I'll connect you with our team so they can help with this."
+    # Bounded multi-turn context: at most this many recent USER/ASSISTANT messages, and at most
+    # this many total characters, are ever shown to the model (see
+    # app/services/ai/whatsapp_agent.py:prepare_whatsapp_history). Deliberately smaller than the
+    # website chat's CHAT_HISTORY_LIMIT: a WhatsApp reply is short, so fewer turns carry the same
+    # conversational signal at a fraction of the prompt-injection and token-cost surface.
+    whatsapp_ai_history_max_messages: int = Field(default=12, ge=0, le=50)
+    whatsapp_ai_history_max_chars: int = Field(default=4000, ge=200, le=20_000)
+    # Consecutive ungrounded/low-confidence replies in one conversation before handoff triggers
+    # regardless of the max-replies-per-window setting (a *quality* signal, not a *volume* one).
+    whatsapp_ai_max_consecutive_fallbacks: int = Field(default=2, ge=1, le=20)
+
+    # --- Email (Phase 9) -----------------------------------------------------------------------
+    # Provider credentials are environment-based, not per-organization (see
+    # app/db/models/email.py:EmailConnection docstring). "resend" (real) or "fake" (offline
+    # development/test only; refused in production, see services/email/catalog.py).
+    email_provider: str = "resend"
+    email_api_key: SecretStr | None = None
+    email_base_url: str = ""  # "" = the provider's default
+    # The domain inbound routing addresses are generated under (org-<slug>@inbound.<domain>).
+    # ".invalid" (RFC 2606, reserved so it can never resolve to anything real) is the deliberate
+    # placeholder until a deployment sets its own real, provider-verified receiving domain.
+    email_inbound_domain: str = "inbound.bizflow.invalid"
+    email_request_timeout_seconds: float = Field(default=20.0, gt=0)
+    email_max_retries: int = Field(default=3, ge=0, le=10)
+    # HMAC secret authenticating inbound webhook deliveries (Resend signs with Svix headers).
+    email_webhook_secret: SecretStr | None = None
+    email_webhook_max_body_bytes: int = Field(default=2_000_000, ge=1024)
+    email_webhook_retention_days: int = Field(default=30, ge=1)
+    # Set when this deployment deliberately has no public email webhook endpoint configured with
+    # the provider (mirrors SHOPIFY_WEBHOOKS_DISABLED / WHATSAPP_WEBHOOKS_DISABLED).
+    email_webhooks_disabled: bool = False
+    # Outbound sends allowed per organization per window: a runaway workflow/campaign cannot
+    # generate unlimited outbound email.
+    email_send_rate_limit: int = Field(default=120, ge=1)
+    email_send_rate_window_seconds: int = Field(default=60, ge=1)
+    # Deployment-wide defaults, shown when an organization has not set its own
+    # EmailConnection.ai_fallback_message / ai_handoff_message.
+    email_ai_fallback_message: str = (
+        "I don't have enough information to confirm that by email. I can connect you with the "
+        "team for help."
+    )
+    email_ai_handoff_message: str = "I'll connect you with our team so they can help with this."
+    email_ai_history_max_messages: int = Field(default=8, ge=0, le=50)
+    email_ai_history_max_chars: int = Field(default=6000, ge=200, le=20_000)
+    email_ai_max_consecutive_fallbacks: int = Field(default=2, ge=1, le=20)
+    # One email campaign send loop runs for at most this long per job, then re-queues itself.
+    email_campaign_batch_size: int = Field(default=50, ge=1, le=1000)
+    # The public base URL this deployment's own one-click unsubscribe link is built under (e.g.
+    # "https://app.example.com"). Required for MARKETING email specifically: without a working
+    # unsubscribe mechanism a marketing send is refused outright (services/email/send.py), never
+    # sent silently with no way to opt out.
+    email_unsubscribe_base_url: str = ""
 
     # --- Chunking ----------------------------------------------------------------------------
     chunk_size: int = Field(default=1200, ge=200, le=4000)  # hard upper bound, in characters
@@ -225,7 +339,13 @@ class Settings(BaseSettings):
             raise ValueError(f"ENVIRONMENT must be one of: {', '.join(ENVIRONMENTS)}")
         return value
 
-    @field_validator("llm_provider", "embedding_provider", mode="before")
+    @field_validator(
+        "llm_provider",
+        "embedding_provider",
+        "whatsapp_messaging_provider",
+        "email_provider",
+        mode="before",
+    )
     @classmethod
     def _provider_id(cls, v: object) -> str:
         value = str(v).strip().lower()
@@ -254,6 +374,16 @@ class Settings(BaseSettings):
                     raise ValueError(
                         f"{env_name}={provider} is not allowed when ENVIRONMENT=production"
                     )
+            if self.whatsapp_messaging_provider in messaging_non_production_provider_ids():
+                raise ValueError(
+                    f"WHATSAPP_MESSAGING_PROVIDER={self.whatsapp_messaging_provider} is not "
+                    "allowed when ENVIRONMENT=production"
+                )
+            if self.email_provider in email_non_production_provider_ids():
+                raise ValueError(
+                    f"EMAIL_PROVIDER={self.email_provider} is not allowed when "
+                    "ENVIRONMENT=production"
+                )
         if self.environment.lower() == "production":
             if self.shopify_dev_base_url:
                 raise ValueError("SHOPIFY_DEV_BASE_URL is not allowed when ENVIRONMENT=production")
@@ -273,6 +403,18 @@ class Settings(BaseSettings):
             else ""
         )
         return bool(self.shopify_client_id.strip() and secret)
+
+    @property
+    def whatsapp_configured(self) -> bool:
+        secret = (
+            self.whatsapp_app_secret.get_secret_value().strip() if self.whatsapp_app_secret else ""
+        )
+        return bool(self.whatsapp_app_id.strip() and secret)
+
+    @property
+    def email_configured(self) -> bool:
+        secret = self.email_api_key.get_secret_value().strip() if self.email_api_key else ""
+        return bool(secret)
 
     @property
     def is_production(self) -> bool:

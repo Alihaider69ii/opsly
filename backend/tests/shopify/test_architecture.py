@@ -69,8 +69,10 @@ def test_configuration_reads_only_pure_data_modules_from_services():
     }
     assert modules <= {
         "app.services.ai.catalog",
+        "app.services.email.catalog",
         "app.services.integrations.shopify.scopes",
         "app.services.integrations.shopify.versioning",
+        "app.services.messaging.catalog",
     }, modules
 
 

@@ -21,6 +21,13 @@ PUBLIC = "public"  # no login; authenticity is established another way (see PUBL
 USER = "user"  # any logged-in account; not tied to one organization
 ANY_MEMBER = "any-member"  # OWNER, ADMIN or MEMBER of the organization acted on
 MANAGER = "manager"  # OWNER or ADMIN only
+# User.is_platform_admin=True, a property of the account itself, never an organization role --
+# deliberately given how=None below so it is excluded from ORG_ROUTES/MANAGER_ROUTES/MEMBER_ROUTES
+# and every org-membership-shaped generic exercise in this file. Its own authorization properties
+# (401 anonymous, 403 for a non-admin, cross-brand isolation under view-as-brand, no escalation via
+# the view-as-brand header) are covered by the dedicated tests/platform/test_api.py instead -- this
+# file's generic machinery assumes an org-role axis that platform admin status is not shaped like.
+PLATFORM_ADMIN = "platform-admin"
 
 HEADER = "header"  # organization chosen with X-Organization-ID
 PATH = "path"  # organization is in the URL
@@ -30,6 +37,14 @@ DOCUMENT = "{document_id}"
 WORKFLOW = "{workflow_id}"
 EXECUTION = "{execution_id}"
 ORG = "{organization_id}"
+CONVERSATION = "{conversation_id}"
+CONTACT = "{contact_id}"
+TEMPLATE = "{template_id}"
+CAMPAIGN = "{campaign_id}"
+CUSTOMER = "{customer_id}"
+ISSUE = "{issue_id}"
+TASK = "{task_id}"
+ACTION = "{action_id}"
 
 # (method, path) -> (who may call, how the organization is named, request body)
 POLICY: dict[tuple[str, str], tuple[str, str | None, dict | None]] = {
@@ -94,6 +109,222 @@ POLICY: dict[tuple[str, str], tuple[str, str | None, dict | None]] = {
     ("GET", f"/api/automations/{WORKFLOW}/executions"): (ANY_MEMBER, HEADER, None),
     ("GET", f"/api/automations/executions/{EXECUTION}"): (ANY_MEMBER, HEADER, None),
     ("POST", "/api/webhooks/shopify"): (PUBLIC, None, None),
+    ("GET", "/api/integrations/whatsapp"): (ANY_MEMBER, HEADER, None),
+    ("POST", "/api/integrations/whatsapp/connect"): (
+        MANAGER,
+        HEADER,
+        {"phone_number_id": "PNID1", "waba_id": "WABA1", "access_token": "test-token"},
+    ),
+    ("POST", "/api/integrations/whatsapp/disconnect"): (MANAGER, HEADER, None),
+    ("POST", "/api/integrations/whatsapp/auto-reply"): (MANAGER, HEADER, {"enabled": True}),
+    ("POST", "/api/integrations/whatsapp/ai-settings"): (
+        MANAGER,
+        HEADER,
+        {
+            "grounding_required": True,
+            "min_confidence": "MEDIUM",
+            "handoff_enabled": True,
+            "fallback_message": None,
+            "handoff_message": None,
+            "max_replies_per_window": 5,
+        },
+    ),
+    ("GET", "/api/whatsapp/conversations"): (ANY_MEMBER, HEADER, None),
+    ("GET", f"/api/whatsapp/conversations/{CONVERSATION}"): (ANY_MEMBER, HEADER, None),
+    ("GET", f"/api/whatsapp/conversations/{CONVERSATION}/messages"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/whatsapp/conversations/{CONVERSATION}/handoff/claim"): (
+        MANAGER,
+        HEADER,
+        None,
+    ),
+    ("POST", f"/api/whatsapp/conversations/{CONVERSATION}/handoff/resolve"): (
+        MANAGER,
+        HEADER,
+        None,
+    ),
+    ("GET", "/api/whatsapp/templates"): (ANY_MEMBER, HEADER, None),
+    ("POST", "/api/whatsapp/templates/sync"): (MANAGER, HEADER, None),
+    ("GET", f"/api/whatsapp/contacts/{CONTACT}/consent"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/whatsapp/contacts/{CONTACT}/consent"): (
+        MANAGER,
+        HEADER,
+        {"category": "MARKETING", "status": "OPTED_IN", "source": "dashboard_manual"},
+    ),
+    ("POST", f"/api/whatsapp/contacts/{CONTACT}/opt-out"): (MANAGER, HEADER, {"reason": "test"}),
+    ("GET", "/api/whatsapp/automation-usage"): (ANY_MEMBER, HEADER, None),
+    ("GET", "/api/webhooks/whatsapp"): (PUBLIC, None, None),
+    ("POST", "/api/webhooks/whatsapp"): (PUBLIC, None, None),
+    ("POST", "/api/webhooks/email"): (PUBLIC, None, None),
+    # --- Phase 9: unified support inbox -----------------------------------------------------
+    ("GET", "/api/support/conversations"): (ANY_MEMBER, HEADER, None),
+    ("GET", f"/api/support/conversations/{CONVERSATION}"): (ANY_MEMBER, HEADER, None),
+    ("GET", f"/api/support/conversations/{CONVERSATION}/messages"): (ANY_MEMBER, HEADER, None),
+    ("GET", f"/api/support/conversations/{CONVERSATION}/timeline"): (ANY_MEMBER, HEADER, None),
+    ("GET", f"/api/support/customers/{CUSTOMER}/timeline"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/support/conversations/{CONVERSATION}/reply"): (
+        ANY_MEMBER,
+        HEADER,
+        {"content": "Thanks for reaching out, let me check on that."},
+    ),
+    ("POST", f"/api/support/conversations/{CONVERSATION}/take-over"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/support/conversations/{CONVERSATION}/return-to-ai"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/support/conversations/{CONVERSATION}/request-human"): (
+        ANY_MEMBER,
+        HEADER,
+        {},
+    ),
+    ("POST", f"/api/support/conversations/{CONVERSATION}/resolve"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/support/conversations/{CONVERSATION}/reopen"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/support/conversations/{CONVERSATION}/claim"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/support/conversations/{CONVERSATION}/assign"): (
+        ANY_MEMBER,
+        HEADER,
+        {"agent_user_id": "11111111-1111-1111-1111-111111111111"},
+    ),
+    ("POST", f"/api/support/conversations/{CONVERSATION}/release"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/support/conversations/{CONVERSATION}/priority"): (
+        ANY_MEMBER,
+        HEADER,
+        {"priority": "HIGH"},
+    ),
+    ("GET", "/api/support/analytics"): (ANY_MEMBER, HEADER, None),
+    # --- Phase 9: email -----------------------------------------------------------------------
+    ("GET", "/api/integrations/email"): (ANY_MEMBER, HEADER, None),
+    ("POST", "/api/integrations/email/connect"): (
+        MANAGER,
+        HEADER,
+        {"from_address": "support@alpha.example"},
+    ),
+    ("POST", "/api/integrations/email/disconnect"): (MANAGER, HEADER, None),
+    ("POST", "/api/integrations/email/auto-reply"): (MANAGER, HEADER, {"enabled": True}),
+    ("POST", "/api/integrations/email/ai-settings"): (
+        MANAGER,
+        HEADER,
+        {
+            "grounding_required": True,
+            "min_confidence": "MEDIUM",
+            "handoff_enabled": True,
+            "fallback_message": None,
+            "handoff_message": None,
+            "max_replies_per_window": 5,
+        },
+    ),
+    ("GET", "/api/email/templates"): (ANY_MEMBER, HEADER, None),
+    ("POST", "/api/email/templates"): (
+        MANAGER,
+        HEADER,
+        {
+            "name": "Welcome",
+            "type": "LIFECYCLE",
+            "subject": "Welcome!",
+            "body_html": "<p>Hi {{customer.first_name}}</p>",
+            "variables": ["customer.first_name"],
+        },
+    ),
+    ("GET", f"/api/email/templates/{TEMPLATE}"): (ANY_MEMBER, HEADER, None),
+    ("PATCH", f"/api/email/templates/{TEMPLATE}"): (
+        MANAGER,
+        HEADER,
+        {
+            "name": "Welcome",
+            "type": "LIFECYCLE",
+            "subject": "Welcome!",
+            "body_html": "<p>Hi {{customer.first_name}}</p>",
+            "variables": ["customer.first_name"],
+        },
+    ),
+    ("POST", f"/api/email/templates/{TEMPLATE}/status"): (MANAGER, HEADER, {"status": "ACTIVE"}),
+    ("POST", f"/api/email/templates/{TEMPLATE}/preview"): (ANY_MEMBER, HEADER, None),
+    ("GET", "/api/email/automation-usage"): (ANY_MEMBER, HEADER, None),
+    ("GET", "/api/email/campaigns"): (ANY_MEMBER, HEADER, None),
+    ("POST", "/api/email/campaigns"): (
+        MANAGER,
+        HEADER,
+        {"name": "Spring Sale", "template_id": "11111111-1111-1111-1111-111111111111"},
+    ),
+    ("GET", f"/api/email/campaigns/{CAMPAIGN}"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/email/campaigns/{CAMPAIGN}/start"): (MANAGER, HEADER, None),
+    ("POST", f"/api/email/campaigns/{CAMPAIGN}/pause"): (MANAGER, HEADER, None),
+    ("POST", f"/api/email/campaigns/{CAMPAIGN}/resume"): (MANAGER, HEADER, None),
+    ("POST", f"/api/email/campaigns/{CAMPAIGN}/cancel"): (MANAGER, HEADER, None),
+    ("GET", "/api/email/unsubscribe"): (PUBLIC, None, None),
+    # --- Phase 10: D2C Operations AI -----------------------------------------------------------
+    ("GET", "/api/operations/dashboard"): (ANY_MEMBER, HEADER, None),
+    ("GET", "/api/operations/analytics"): (ANY_MEMBER, HEADER, None),
+    ("POST", "/api/operations/sweep"): (ANY_MEMBER, HEADER, None),
+    ("GET", "/api/operations/issues"): (ANY_MEMBER, HEADER, None),
+    ("POST", "/api/operations/issues"): (
+        ANY_MEMBER,
+        HEADER,
+        {"category": "ORDER", "title": "Policy matrix test issue"},
+    ),
+    ("GET", f"/api/operations/issues/{ISSUE}"): (ANY_MEMBER, HEADER, None),
+    ("PATCH", f"/api/operations/issues/{ISSUE}"): (ANY_MEMBER, HEADER, {"priority": "HIGH"}),
+    ("POST", f"/api/operations/issues/{ISSUE}/assign"): (
+        ANY_MEMBER,
+        HEADER,
+        {"assigned_user_id": "11111111-1111-1111-1111-111111111111"},
+    ),
+    ("POST", f"/api/operations/issues/{ISSUE}/resolve"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/operations/issues/{ISSUE}/reopen"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/operations/issues/{ISSUE}/dismiss"): (ANY_MEMBER, HEADER, None),
+    ("GET", "/api/operations/tasks"): (ANY_MEMBER, HEADER, None),
+    ("POST", "/api/operations/tasks"): (
+        ANY_MEMBER,
+        HEADER,
+        {"title": "Policy matrix test task", "category": "ORDER"},
+    ),
+    ("GET", f"/api/operations/tasks/{TASK}"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/operations/tasks/{TASK}/claim"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/operations/tasks/{TASK}/release"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/operations/tasks/{TASK}/escalate"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/operations/tasks/{TASK}/resolve"): (ANY_MEMBER, HEADER, {"resolution": "done"}),
+    ("POST", f"/api/operations/tasks/{TASK}/reopen"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/operations/tasks/{TASK}/cancel"): (ANY_MEMBER, HEADER, {}),
+    ("GET", "/api/operations/orders"): (ANY_MEMBER, HEADER, None),
+    ("GET", "/api/operations/inventory"): (ANY_MEMBER, HEADER, None),
+    ("GET", "/api/operations/shipping"): (ANY_MEMBER, HEADER, None),
+    ("GET", "/api/operations/payments"): (ANY_MEMBER, HEADER, None),
+    ("GET", "/api/operations/returns"): (ANY_MEMBER, HEADER, None),
+    ("POST", "/api/operations/ai/query"): (
+        ANY_MEMBER,
+        HEADER,
+        {"question": "What orders need attention today?"},
+    ),
+    ("GET", "/api/operations/actions"): (ANY_MEMBER, HEADER, None),
+    ("POST", "/api/operations/actions"): (
+        ANY_MEMBER,
+        HEADER,
+        {
+            "action_type": "create_task",
+            "resource_type": "operational_issue",
+            "idempotency_key": "policy-matrix-test",
+            "payload": {"title": "x", "category": "ORDER"},
+        },
+    ),
+    ("GET", f"/api/operations/actions/{ACTION}"): (ANY_MEMBER, HEADER, None),
+    ("POST", f"/api/operations/actions/{ACTION}/approve"): (MANAGER, HEADER, None),
+    ("POST", f"/api/operations/actions/{ACTION}/reject"): (MANAGER, HEADER, None),
+    ("POST", f"/api/operations/actions/{ACTION}/execute"): (ANY_MEMBER, HEADER, None),
+    ("GET", "/api/platform/dashboard"): (PLATFORM_ADMIN, None, None),
+    ("GET", "/api/platform/brands"): (PLATFORM_ADMIN, None, None),
+    ("POST", "/api/platform/brands"): (
+        PLATFORM_ADMIN,
+        None,
+        {
+            "name": "Policy Matrix Brand",
+            "environment": "DEMO",
+            "owner_name": "Owner",
+            "owner_email": "owner@policy-matrix-brand.demo",
+            "temporary_password": "Demo12345!",
+        },
+    ),
+    ("GET", f"/api/platform/brands/{ORG}"): (PLATFORM_ADMIN, None, None),
+    ("POST", f"/api/platform/brands/{ORG}/activate"): (PLATFORM_ADMIN, None, None),
+    ("POST", f"/api/platform/brands/{ORG}/deactivate"): (PLATFORM_ADMIN, None, None),
+    ("POST", f"/api/platform/brands/{ORG}/enter"): (PLATFORM_ADMIN, None, None),
+    ("POST", f"/api/platform/brands/{ORG}/exit"): (PLATFORM_ADMIN, None, None),
+    ("GET", "/api/platform/audit"): (PLATFORM_ADMIN, None, None),
     ("GET", "/health"): (PUBLIC, None, None),
     ("GET", "/health/live"): (PUBLIC, None, None),
     ("GET", "/health/ready"): (PUBLIC, None, None),
@@ -106,6 +337,18 @@ PUBLIC_REASON = {
     "/api/auth/register": "creates an account; nothing to read",
     "/api/public/chat/": "the widget's public key + a per-conversation secret token",
     "/api/webhooks/shopify": "HMAC-SHA256 over the raw body with the app secret",
+    "/api/webhooks/whatsapp": (
+        "GET: hub.verify_token proves the caller configured the subscription; "
+        "POST: X-Hub-Signature-256 (HMAC-SHA256) over the raw body with the Meta App secret"
+    ),
+    "/api/webhooks/email": (
+        "Svix signature (svix-id/svix-timestamp/svix-signature headers) over the raw body with "
+        "the configured EMAIL_WEBHOOK_SECRET"
+    ),
+    "/api/email/unsubscribe": (
+        "a stateless HMAC-signed token (customer+org, keyed off SECRET_ENCRYPTION_KEY) issued "
+        "only inside a marketing email this app itself sent -- see services/email/unsubscribe.py"
+    ),
     "/health": "liveness/readiness carry no data about tenants",
 }
 
