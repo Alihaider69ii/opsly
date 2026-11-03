@@ -29,4 +29,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 
 # X-Forwarded-For is honoured only from the addresses in the FORWARDED_ALLOW_IPS environment
 # variable (uvicorn reads it); production refuses to start without it being set explicitly.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-server-header", "--timeout-keep-alive", "5"]
+
+RUN chmod +x start.sh
+
+CMD ["./start.sh"]
